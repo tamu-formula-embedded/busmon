@@ -1,0 +1,1352 @@
+-- ./src/can_interface.cc --
+#include "can_interface.h"
+#include "utils.h"
+
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <chrono>
+#include <cstring>
+#include <iostream>
+
+std::string CANFrame::Str() const
+{
+    std::string s = Utils::StrFmt("CANFrame{ id=0x%04X data=", id);
+    for (int i = 0; i < 8; i++)
+        s += Utils::StrFmt("%02x ", data[i]);
+    s += Utils::StrFmt("ts=%u }", timestamp);
+    return s;
+}
+
+CanInterface::CanInterface(const std::string &host, uint16_t port, bool verbose)
+    : host_(host), port_(port), verbose_(verbose)
+{
+}
+
+CanInterface::~CanInterface() { Stop(); }
+
+void CanInterface::SetOnFrame(FrameCallback cb) { on_frame_ = std::move(cb); }
+void CanInterface::SetOnConnect(ConnectCallback cb) { on_connect_ = std::move(cb); }
+void CanInterface::SetOnDisconnect(DisconnectCallback cb) { on_disconnect_ = std::move(cb); }
+
+bool CanInterface::IsConnected() const { return connected_.load(); }
+
+bool CanInterface::Connect()
+{
+    if (connected_.load())
+        return true;
+
+    // Resolve host
+    struct addrinfo hints{}, *res = nullptr;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    std::string port_str = std::to_string(port_);
+    int rc = getaddrinfo(host_.c_str(), port_str.c_str(), &hints, &res);
+    if (rc != 0 || !res)
+    {
+        if (verbose_)
+            std::cerr << "[can] resolve failed: " << gai_strerror(rc) << "\n";
+        return false;
+    }
+
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0)
+    {
+        if (verbose_)
+            std::cerr << "[can] socket(): " << strerror(errno) << "\n";
+        freeaddrinfo(res);
+        return false;
+    }
+
+    // TCP_NODELAY + SO_KEEPALIVE to match the Java side
+    int flag = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+
+    // Connect with a 3-second timeout via non-blocking + poll
+    // (simple blocking connect is fine for a CLI tool)
+    struct timeval tv{3, 0};
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    if (::connect(fd, res->ai_addr, res->ai_addrlen) < 0)
+    {
+        if (verbose_)
+            std::cerr << "[can] connect to " << host_ << ":" << port_
+                      << " failed: " << strerror(errno) << "\n";
+        ::close(fd);
+        freeaddrinfo(res);
+        return false;
+    }
+    freeaddrinfo(res);
+
+    sockfd_ = fd;
+    connected_.store(true);
+
+    if (verbose_)
+        std::cout << "[can] connected to " << host_ << ":" << port_ << "\n";
+
+    if (on_connect_)
+        on_connect_();
+    return true;
+}
+
+void CanInterface::Disconnect()
+{
+    bool was = connected_.exchange(false);
+    if (sockfd_ >= 0)
+    {
+        ::shutdown(sockfd_, SHUT_RDWR);
+        ::close(sockfd_);
+        sockfd_ = -1;
+    }
+    if (was && on_disconnect_)
+        on_disconnect_();
+}
+
+void CanInterface::Start()
+{
+    if (running_.load())
+        return;
+    running_.store(true);
+
+    if (!Connect())
+    {
+        running_.store(false);
+        return;
+    }
+
+    rx_thread_ = std::thread([this]()
+                             { RxLoop(); });
+}
+
+void CanInterface::Stop()
+{
+    running_.store(false);
+    Disconnect();
+    if (rx_thread_.joinable())
+        rx_thread_.join();
+}
+
+bool CanInterface::SendFrame(uint32_t can_id, const uint8_t *data, uint8_t len)
+{
+    if (!connected_.load())
+        return false;
+
+    uint8_t pkt[13]{};
+    uint8_t ext = (can_id > 0x7FF) ? 0x80 : 0x00;
+    pkt[0] = (len & 0x0F) | ext;
+
+    pkt[1] = (can_id >> 24) & 0xFF;
+    pkt[2] = (can_id >> 16) & 0xFF;
+    pkt[3] = (can_id >> 8) & 0xFF;
+    pkt[4] = (can_id >> 0) & 0xFF;
+
+    std::memcpy(pkt + 5, data, std::min<int>(len, 8));
+
+    std::lock_guard<std::mutex> lock(write_mu_);
+    ssize_t n = ::send(sockfd_, pkt, 13, MSG_NOSIGNAL);
+    if (n != 13)
+    {
+        if (verbose_)
+            std::cerr << "[can] send failed: " << strerror(errno) << "\n";
+        Disconnect();
+        return false;
+    }
+    return true;
+}
+
+bool CanInterface::ReadFully(uint8_t *buf, size_t len)
+{
+    size_t off = 0;
+    while (off < len)
+    {
+        ssize_t n = ::recv(sockfd_, buf + off, len - off, 0);
+        if (n <= 0)
+            return false; // EOF or error
+        off += n;
+    }
+    return true;
+}
+
+void CanInterface::RxLoop()
+{
+    uint8_t buf[13];
+
+    while (running_.load() && connected_.load())
+    {
+        if (!ReadFully(buf, 13))
+        {
+            if (running_.load() && verbose_)
+                std::cerr << "[can] rx: connection lost\n";
+            break;
+        }
+
+        // Decode — mirrors Java EthInterface.handle()
+        // uint8_t header = buf[0];
+        uint32_t can_id = ((uint32_t)buf[1] << 24) | ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 8) | ((uint32_t)buf[4]);
+
+        uint8_t data[8];
+        std::memcpy(data, buf + 5, 8);
+
+        CANFrame pkt(can_id, data);
+
+        auto now = std::chrono::steady_clock::now().time_since_epoch();
+        pkt.timestamp = static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
+
+        if (verbose_)
+            std::cout << "[can] rx " << pkt.Str() << "\n";
+
+        if (on_frame_)
+            on_frame_(pkt);
+    }
+
+    Disconnect();
+}
+-- ./src/can_interface.h --
+#ifndef _CAN_INTERFACE_H_
+#define _CAN_INTERFACE_H_
+
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <functional>
+#include <thread>
+#include <atomic>
+#include <mutex>
+
+// Each frame on the wire is 13 bytes:
+//   [0]      header:  (data_len & 0x0F) | (extended ? 0x80 : 0x00)
+//   [1..4]   CAN ID   (big-endian uint32)
+//   [5..12]  data     (8 bytes, zero-padded)
+struct CANFrame
+{
+    uint32_t id;
+    uint8_t data[8];
+    uint32_t timestamp; // ms since epoch (filled on receipt)
+
+    CANFrame() : id(0), data{}, timestamp(0) {}
+    CANFrame(uint32_t id, const uint8_t *d) : id(id), timestamp(0)
+    {
+        std::memcpy(data, d, 8);
+    }
+
+    std::string Str() const;
+};
+
+using FrameCallback = std::function<void(const CANFrame &)>;
+using ConnectCallback = std::function<void()>;
+using DisconnectCallback = std::function<void()>;
+
+class CanInterface
+{
+public:
+    CanInterface(const std::string &host, uint16_t port, bool verbose = false);
+    ~CanInterface();
+
+    // Non-copyable
+    CanInterface(const CanInterface &) = delete;
+    CanInterface &operator=(const CanInterface &) = delete;
+
+    void SetOnFrame(FrameCallback cb);
+    void SetOnConnect(ConnectCallback cb);
+    void SetOnDisconnect(DisconnectCallback cb);
+
+    bool Connect(); // blocking connect
+    void Disconnect();
+    void Start(); // connect + spawn rx thread
+    void Stop();
+
+    bool IsConnected() const;
+
+    bool SendFrame(uint32_t can_id, const uint8_t *data, uint8_t len = 8);
+
+private:
+    void RxLoop();
+    bool ReadFully(uint8_t *buf, size_t len);
+
+    std::string host_;
+    uint16_t port_;
+    bool verbose_;
+    int sockfd_{-1};
+
+    std::atomic<bool> running_{false};
+    std::atomic<bool> connected_{false};
+    std::thread rx_thread_;
+    std::mutex write_mu_;
+
+    FrameCallback on_frame_;
+    ConnectCallback on_connect_;
+    DisconnectCallback on_disconnect_;
+};
+
+#endif // _CAN_INTERFACE_H_
+-- ./src/display.cc --
+#include "display.h"
+
+#include <chrono>
+
+void RenderTable(const DisplayState &state, const PacketMapper &mapper, uint64_t uptime_ms)
+{
+    Term::Home();
+
+    // Header
+    Term::Bold();
+    Term::Cyan();
+    std::printf("  busmon");
+    Term::Reset();
+    Term::Dim();
+    std::printf("  —  CAN bus monitor\n");
+    Term::Reset();
+
+    // Status bar
+    if (state.connected)
+    {
+        Term::Green();
+        std::printf("  ● CONNECTED");
+    }
+    else
+    {
+        Term::Red();
+        std::printf("  ● DISCONNECTED");
+    }
+    Term::Reset();
+    Term::Dim();
+    std::printf("    rx: %-8lu   uptime: %.1fs",
+                (unsigned long)state.rx_count, uptime_ms / 1000.0);
+    Term::Reset();
+    std::printf("\n\n");
+
+    // Table header
+    Term::Bold();
+    std::printf("  %-24s %14s  %-8s  %10s\n",
+                "IDENTIFIER", "VALUE", "UNIT", "AGE (ms)");
+    Term::Reset();
+    Term::Dim();
+    std::printf("  ────────────────────────────────────────────────────────────\n");
+    Term::Reset();
+
+    uint32_t now_ms = static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+
+    for (const auto &[can_id, submappings] : mapper.GetMappings())
+    {
+        for (const auto &mapping : submappings)
+        {
+            auto it = state.values.find(mapping.identifier);
+            if (it != state.values.end())
+            {
+                const MappedPacket &mp = it->second;
+                uint32_t age = now_ms - mp.timestamp;
+
+                std::printf("  %-24s ", mapping.identifier.c_str());
+                Term::Bold();
+                std::printf("%14.4f", mp.value);
+                Term::Reset();
+                std::printf("  %-8s  ", mapping.unit.c_str());
+
+                if (age < 500)
+                    Term::Green();
+                else if (age < 2000)
+                    Term::Yellow();
+                else
+                    Term::Red();
+                std::printf("%8u ms", age);
+                Term::Reset();
+                std::printf("\n");
+            }
+            else
+            {
+                Term::Dim();
+                std::printf("  %-24s %14s  %-8s  %10s\n",
+                            mapping.identifier.c_str(), "---",
+                            mapping.unit.c_str(), "---");
+                Term::Reset();
+            }
+        }
+    }
+
+    for (int i = 0; i < 4; i++)
+        std::printf("%-72s\n", "");
+    std::fflush(stdout);
+}
+-- ./src/display.h --
+#ifndef _DISPLAY_H_
+#define _DISPLAY_H_
+
+#include <cstdint>
+#include <cstdio>
+#include <map>
+#include <mutex>
+#include <string>
+
+#include "packet_mapper.h"
+
+namespace Term {
+    inline void Clear()      { std::fputs("\033[2J", stdout); }
+    inline void Home()       { std::fputs("\033[H",  stdout); }
+    inline void HideCursor() { std::fputs("\033[?25l", stdout); }
+    inline void ShowCursor() { std::fputs("\033[?25h", stdout); }
+    inline void Bold()       { std::fputs("\033[1m", stdout); }
+    inline void Dim()        { std::fputs("\033[2m", stdout); }
+    inline void Reset()      { std::fputs("\033[0m", stdout); }
+    inline void Green()      { std::fputs("\033[32m", stdout); }
+    inline void Yellow()     { std::fputs("\033[33m", stdout); }
+    inline void Cyan()       { std::fputs("\033[36m", stdout); }
+    inline void Red()        { std::fputs("\033[31m", stdout); }
+}
+
+struct DisplayState {
+    std::mutex                          mu;
+    std::map<std::string, MappedPacket> values;
+    uint64_t                            rx_count{0};
+    bool                                connected{false};
+};
+
+void RenderTable(const DisplayState& state, const PacketMapper& mapper, uint64_t uptime_ms);
+
+#endif
+-- ./src/main.cc --
+// busmon — CAN bus monitor with live terminal display
+//
+// Usage:  busmon -f mappings.txt [-h host] [-p port] [-r rate_hz] [-v]
+
+#include "can_interface.h"
+#include "display.h"
+#include "packet_mapper.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <iostream>
+#include <signal.h>
+#include <thread>
+
+static constexpr const char *DEFAULT_HOST = "192.168.0.20";
+static constexpr uint16_t DEFAULT_PORT = 10001;
+static constexpr int DEFAULT_HZ = 10;
+
+static std::atomic<bool> g_running{true};
+static void SigHandler(int) { g_running.store(false); }
+
+struct Args
+{
+    std::string config_path;
+    std::string host = DEFAULT_HOST;
+    uint16_t port = DEFAULT_PORT;
+    int hz = DEFAULT_HZ;
+    bool verbose = false;
+};
+
+static void PrintUsage(const char *argv0)
+{
+    std::fprintf(stderr,
+                 "Usage: %s -f <mappings.txt> [options]\n"
+                 "\n"
+                 "Options:\n"
+                 "  -f <path>    Packet mapping config file (required)\n"
+                 "  -h <host>    CAN bridge host  [%s]\n"
+                 "  -p <port>    CAN bridge port  [%u]\n"
+                 "  -r <hz>      Display refresh rate  [%d]\n"
+                 "  -v           Verbose CAN traffic logging\n",
+                 argv0, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_HZ);
+}
+
+static bool ParseArgs(int argc, char **argv, Args &args)
+{
+    for (int i = 1; i < argc; i++)
+    {
+        if (std::strcmp(argv[i], "-f") == 0 && i + 1 < argc)
+        {
+            args.config_path = argv[++i];
+        }
+        else if (std::strcmp(argv[i], "-h") == 0 && i + 1 < argc)
+        {
+            args.host = argv[++i];
+        }
+        else if (std::strcmp(argv[i], "-p") == 0 && i + 1 < argc)
+        {
+            args.port = static_cast<uint16_t>(std::atoi(argv[++i]));
+        }
+        else if (std::strcmp(argv[i], "-r") == 0 && i + 1 < argc)
+        {
+            args.hz = std::atoi(argv[++i]);
+        }
+        else if (std::strcmp(argv[i], "-v") == 0)
+        {
+            args.verbose = true;
+        }
+        else
+        {
+            std::fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            return false;
+        }
+    }
+    if (args.config_path.empty())
+    {
+        std::fprintf(stderr, "Error: -f <mappings.txt> is required\n\n");
+        return false;
+    }
+    return true;
+}
+
+int main(int argc, char **argv)
+{
+    Args args;
+    if (!ParseArgs(argc, argv, args))
+    {
+        PrintUsage(argv[0]);
+        return 1;
+    }
+
+    PacketMapper mapper;
+    if (!mapper.LoadMappings(args.config_path))
+    {
+        std::cerr << "Failed to load mappings from " << args.config_path << "\n";
+        return 1;
+    }
+
+    if (args.verbose)
+        std::cout << "Loaded mappings:\n"
+                  << mapper.Str() << "\n";
+
+    DisplayState display;
+
+    CanInterface can(args.host, args.port, args.verbose);
+
+    can.SetOnFrame([&](const CANFrame &pkt)
+                   {
+        std::vector<MappedPacket> updated;
+        mapper.MapPacket(pkt, updated);
+
+        std::lock_guard<std::mutex> lock(display.mu);
+        display.rx_count++;
+        for (auto& mp : updated)
+            display.values.insert_or_assign(mp.identifier, mp); });
+
+    can.SetOnConnect([&]()
+                     {
+        std::lock_guard<std::mutex> lock(display.mu);
+        display.connected = true; });
+
+    can.SetOnDisconnect([&]()
+                        {
+        std::lock_guard<std::mutex> lock(display.mu);
+        display.connected = false; });
+
+    signal(SIGINT, SigHandler);
+    signal(SIGTERM, SigHandler);
+
+    can.Start();
+
+    auto t0 = std::chrono::steady_clock::now();
+    Term::HideCursor();
+    Term::Clear();
+
+    while (g_running.load())
+    {
+        uint64_t uptime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count();
+
+        {
+            std::lock_guard<std::mutex> lock(display.mu);
+            RenderTable(display, mapper, uptime);
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000 / args.hz));
+    }
+
+    Term::ShowCursor();
+    Term::Reset();
+    std::printf("\nbusmon: shutting down\n");
+
+    can.Stop();
+    return 0;
+}
+-- ./src/packet_mapper.cc --
+#include "packet_mapper.h"
+#include "can_interface.h"
+
+bool is_whitespace(const char ch)
+{
+    return (ch == ' ') || (ch == '\t') || (ch == '\n') || (ch == '\r');
+}
+
+bool between(const char ch, const char min, const char max)
+{
+    return ch >= min && ch <= max;
+}
+
+std::string PacketMapping::Str()
+{
+    return Utils::StrFmt("PacketMapping{ range=%d:%d identifier=%s coef=%d unit=%s }", start, end, identifier, coef,
+                         unit);
+}
+
+bool PacketMapper::ExpectID(fileiter& it, fileiter end, uint32_t& id)
+{
+    id = 0;
+    if (*it == '0') {
+        it++;
+        if (*it == 'x') {
+            IterWS(it);
+            while (it != end) {
+                if (between(*it, '0', '9')) {
+                    id <<= 4;
+                    id |= (uint8_t)(*it - '0');
+                }
+                else if (between(*it, 'A', 'F')) {
+                    id <<= 4;
+                    id |= (uint8_t)((*it - 'A') + 10);
+                }
+                else if (between(*it, 'a', 'f')) {
+                    id <<= 4;
+                    id |= (uint8_t)((*it - 'a') + 10);
+                }
+                else {
+                    // look for {
+                    if (*it == '{') return true;
+                    return Unexpected("0-9 or a-f or A-F", *it);
+                }
+                IterWS(it);
+            }
+            return BadEOF(); // ? did correctly read but hit end,
+                             // shouldnt really ever happen but
+                             // thats not in the scope of this
+                             // functions responsibilites
+        }
+        else if (*it == 'b') {
+            IterWS(it);
+            while (it != end) {
+                if (*it == '0') { id <<= 1; }
+                else if (*it == '1') {
+                    id <<= 1;
+                    id |= 1;
+                }
+                else {
+                    if (*it == '{') return true;
+                    return Unexpected("0 or 1", *it);
+                }
+                IterWS(it);
+            }
+            return BadEOF();
+        }
+        else {
+            return Unexpected("x or b", *it);
+        }
+    }
+    else {
+        return Unexpected("0", *it);
+    }
+}
+
+bool PacketMapper::ExpectRange(fileiter& it, fileiter end, uint8_t& first, uint8_t& last)
+{
+    while (it != end) {
+        if (!between(*it, '1', '8')) return Unexpected("1-8", *it);
+        first = *it - '1';
+        IterWS(it);
+        if (*it != ':') return Unexpected("-", *it);
+        IterWS(it);
+        if (!between(*it, '1', '8')) return Unexpected("1-8", *it);
+        last = *it - '1';
+        IterWS(it);
+        return true;
+    }
+    return BadEOF();
+}
+
+bool PacketMapper::ExpectIdentifier(fileiter& it, fileiter end, std::string& identifier)
+{
+    if (it == end) return BadEOF();
+    if (!between(*it, 'a', 'z') && !between(*it, 'A', 'Z')) return Unexpected("a-z or A-Z", *it);
+    identifier += *it++;
+    while (it != end) {
+        if (between(*it, 'a', 'z') || between(*it, 'A', 'Z') || *it == '_' 
+			|| between(*it, '0', '9')) identifier += *it++;
+        else {
+            if (is_whitespace(*it)) IterWS(it);
+            return true;
+        }
+    }
+    return BadEOF();
+}
+
+bool PacketMapper::ExpectCoef(fileiter& it, fileiter end, uint64_t& coef)
+{
+    coef = 0;
+    while (it != end) {
+        if (between(*it, '0', '9')) {
+            coef *= 10;
+            coef += (uint8_t)(*it - '0');
+            it++;
+        }
+        else {
+            if (is_whitespace(*it)) IterWS(it);
+            break;
+        }
+    }
+    return coef != 0; // coef must be non-zero, otherwise its not a valid coef.
+                      // coef = 0 can also indicate a parsing failure
+}
+
+bool PacketMapper::LoadMappings(const std::string& path)
+{
+    std::ifstream file(path);
+    if (!file) {
+        std::cout << "Failed to open config file" << std::endl;
+        return false;
+    }
+
+    fileiter it = std::istreambuf_iterator<char>(file);
+    fileiter end = std::istreambuf_iterator<char>();
+
+    while (it != end) {
+
+        uint32_t can_id;
+        if (!ExpectID(it, end, can_id)) return false;
+
+        if (*it != '{') return Unexpected("{", *it);
+        else IterWS(it);
+
+        std::vector<PacketMapping> mappings;
+        while (it != end) {
+            std::string identifier;
+            if (!ExpectIdentifier(it, end, identifier)) return false;
+
+            if (*it != '=') return Unexpected("=", *it);
+            else IterWS(it);
+
+            uint8_t first, last;
+            if (!ExpectRange(it, end, first, last)) return false;
+
+            uint64_t coef = 1;
+            if (*it == '/') {
+                IterWS(it);
+                if (!ExpectCoef(it, end, coef)) {
+                    std::cout << "[ParsingError] Failed to parse coef or encountered invalid coef.\n";
+                    return false;
+                }
+            }
+
+            std::string unit = "";
+            if (*it == '(') {
+                IterWS(it);
+                while (it != end) {
+                    if (*it == ')') {
+                        IterWS(it);
+                        break;
+                    }
+                    unit += *it++;
+                }
+            }
+
+            PacketMapping mapping{first, last, identifier, coef, unit};
+            mappings.push_back(mapping);
+
+            if (*it == '}') {
+                IterWS(it);
+                break;
+            }
+            else if (*it == ',') {
+                IterWS(it);
+                continue;
+            }
+            else {
+                return Unexpected(", or }", *it);
+            }
+        }
+        this->mappings[can_id] = mappings; // oh god confusing :scared_emoji:
+    }
+    return true;
+}
+
+void PacketMapper::MapPacket(const CANFrame& packet, std::vector<MappedPacket>& vec)
+{
+    auto it = mappings.find(packet.id);
+    if (it == mappings.end()) return;
+    for (const PacketMapping& mapping : it->second) {
+        int64_t extracted = 0;
+        int width = mapping.end - mapping.start;
+        for (int i = mapping.start, j = 0; i <= mapping.end; i++) {
+            //extracted |= packet.data[i] << (8 * (j++)); // some endian configuration
+            extracted |= packet.data[i] << (8 * (width - (j++))); // other endian configuration
+        }
+	if (mapping.negable && ((int8_t)packet.data[mapping.start] < 0)) extracted = -extracted;
+        double adjusted = extracted / (double)mapping.coef;
+	//if (!std::isfinite(adjusted)) adjusted = 0;
+	//std::cout << packet.id << " " << adjusted << " " << mapping.identifier << "\n";
+	auto mp = MappedPacket(mapping.identifier, adjusted, packet.timestamp);
+	// https://stackoverflow.com/a/73372990/11337553
+	values.insert_or_assign(mapping.identifier, mp);
+	vec.push_back(mp);
+    }
+}
+
+std::string PacketMapper::Str()
+{
+    std::string d = "[\n";
+    for (const auto& [can_id, submappings] : mappings) {
+        d += Utils::StrFmt("  Mapping{ can_id=%04x submappings={\n", can_id);
+        for (auto submapping : submappings) { d += "    " + submapping.Str() + "\n"; }
+        d += "  } }\n";
+    }
+    d += "]\n";
+    return d;
+}
+
+void PacketMapper::LogState(std::ofstream& file, uint64_t global_start_time)
+{
+    file << "@" << Utils::PreciseTime<uint32_t, Utils::t_ms>() - global_start_time << "\n";
+    for (const auto& [key, value] : values) { file << key << "=" << value.value << "\n"; }
+}
+
+void TestPacketMapper(PacketMapper& mapper)
+{
+    /* Designed to test the following config file:
+
+    0xf5ae {
+        velocity = 1:4,
+        acceleration = 5:8
+    }
+
+    0b 1111 1111 {
+        voltage = 1:8 / 1000
+    }
+
+    */
+    uint8_t a[8] = {0};
+    int32_t velo = 75080350;
+    memcpy(a, &velo, 4);
+    int32_t accel = -650290;
+    memcpy(a + 4, &accel, 4);
+    CANFrame packet1(0xF5AE, a);
+
+    uint8_t b[8] = {0};
+    double voltage = 48.312;
+    uint64_t ivoltage = (uint64_t)(voltage * 1000);
+    memcpy(b, &ivoltage, 8);
+    CANFrame packet2(0b11111111, b);
+
+    std::cout << "\nTesting parsing of packets: \n" << packet1.Str() << "\n" << packet2.Str() << "\n";
+
+    std::vector<MappedPacket> updated{};
+    mapper.MapPacket(packet1, updated);
+    mapper.MapPacket(packet2, updated);
+    std::cout << "\n\nValues after parsing: \n";
+    mapper.PrintState();
+}
+-- ./src/packet_mapper.h --
+#ifndef _PACKET_MAPPER_H_
+#define _PACKET_MAPPER_H_
+
+#include <cstdint>
+#include <iostream>
+#include <map>
+#include <vector>
+
+#include "utils.h"
+
+bool is_whitespace(const char ch);
+
+// between(x, 'a', 'z') ~ 'a' <= x <= 'z'
+bool between(const char ch, const char min, const char max);
+
+struct PacketMapping
+{ // encapsulates the concept: "identifier": [start, end]
+    size_t start;
+    size_t end;
+    std::string identifier;
+    uint64_t coef;
+    std::string unit;
+    bool negable{true};
+
+    PacketMapping(size_t start, size_t end, const std::string &identifier, uint64_t coef, const std::string &unit)
+        : start(start), end(end), identifier(identifier), coef(coef), unit(unit)
+    {
+    }
+
+    std::string Str();
+};
+
+// MappedPacket is the result of mapping a CANFrame to a human
+// readable format. This is the result of the mapping process
+// and is used to send the data over the network. This is not
+// the same as the PacketMapping, which is used to map the
+// CANFrame to a human readable format.
+struct MappedPacket
+{
+    std::string identifier;
+    double value;
+    uint32_t timestamp;
+
+    MappedPacket(std::string identifier, double value, uint32_t timestamp)
+        : identifier(identifier), value(value), timestamp(timestamp)
+    {
+    }
+
+    inline void Stream(std::ostream &os) const
+    {
+        // os << Utils::StrFmt("{\"identifier\": \"%s\", \"value\": %f, \"timestamp\": %u}", identifier.c_str(), value,
+        // timestamp);
+        os << timestamp << ":" << identifier << ":" << value;
+    }
+};
+
+class PacketMapper
+{
+    using fileiter = std::istreambuf_iterator<char>;
+    // treemap is intentional, these are bounded to human
+    // ~comprehensable~ size n
+    std::map<uint32_t, std::vector<PacketMapping>> mappings{};
+
+    inline char IterWS(fileiter &it)
+    { // next and skip whitespace
+        char n = *it++;
+        while (is_whitespace(*it))
+            it++;
+        return n;
+    }
+
+    // to throw when encountering a character that you dont expect
+    inline bool Unexpected(const std::string &expected, char unexpected)
+    {
+        std::cout << "[ParsingError] Expected " << expected << ", found " << unexpected << "\n";
+        return false;
+    }
+
+    // to throw when encountering EOF before you would expect
+    inline bool BadEOF()
+    {
+        std::cout << "[ParsingError] Reached EOF before expected\n";
+        return false;
+    }
+
+    // Parses through the can_id at the beginning of a rule
+    // wants hex or binary -- valid forms:
+    // - 0xf5ae
+    // - 0xE1EC
+    // - 0b110011001100
+    // *note* whitespace breaks are allowed, usually for
+    // making binary formatting easier to read, ex:
+    // - 0b 111 101110 110010
+    bool ExpectID(fileiter &it, fileiter end, uint32_t &id);
+
+    // Parses through the range #-# where # is a digit in range [1,8]
+    // Specifies the start and end byte for a mapping
+    // The result is emplaced in first and last as 0 indexed!
+    bool ExpectRange(fileiter &it, fileiter end, uint8_t &first, uint8_t &last);
+
+    // Expect an identifier -- rules:
+    // - first character: a-z or A-Z
+    // - subsequent characters: a-z, A-Z, 0-9, or _ (underscore)
+    // - no whitespace breaks
+    //
+    bool ExpectIdentifier(fileiter &it, fileiter end, std::string &identifier);
+
+    bool ExpectCoef(fileiter &it, fileiter end, uint64_t &coeg);
+
+public:
+    inline std::map<uint32_t, std::vector<PacketMapping>> &GetMappings()
+    {
+        return mappings;
+    }
+
+    std::map<std::string, MappedPacket> values{};
+
+    // Parse the mapping tree from the config file at path
+    bool LoadMappings(const std::string &path);
+
+    // Take a CANFrame that was parsed from the network and map it
+    // based on the config file. This writes the mapped packets to the
+    // (a) the values map in this class scope
+    // (b) the vector passed in as reference
+    void MapPacket(const CANFrame &packet, std::vector<MappedPacket> &vec);
+
+    std::string Str();
+
+    void LogState(std::ofstream &file, uint64_t global_start_time);
+
+    inline void PrintState()
+    {
+        for (const auto &[key, value] : values)
+        {
+            value.Stream(std::cout); // when printing we stream each packet
+                                     // to stdout
+            std::cout << "\n";
+        }
+    }
+
+    PacketMapper() {};
+};
+
+void TestPacketMapper(PacketMapper &mapper);
+
+#endif
+-- ./src/utils.cc --
+/**
+ * cpputil
+ *
+ * A collection of utilities that I have been copying
+ * from project-to-project for past ~5 years. Finally,
+ * it is time to serialize in a "library".
+ *
+ * This "library" owes much of its origin to my good
+ * friend Paul Bailey. He and I worked significantly
+ * with this code while working at NASA JSC.
+ *
+ * Justus Languell     https://www.linkedin.com/in/justusl/
+ * Paul Ryan Bailey    https://www.linkedin.com/in/paul-ryan-bailey/
+ */
+#include "utils.h"
+
+#include <thread>
+
+/**
+ * @brief Appends a 16-bit integer to a buffer at the specified index.
+ *
+ * This function takes a 16-bit integer, splits it into two 8-bit values, and
+ * appends them to a buffer at the specified index. The index is then
+ * incremented by 2.
+ *
+ * @param buffer The buffer to which the integer will be appended.
+ * @param number The 16-bit integer to be appended.
+ * @param index A pointer to the index at which the integer will be appended.
+ * The index is updated after appending the integer.
+ */
+void Utils::BufAppendInt16(uint8_t *buffer, int16_t number, int32_t *index)
+{
+    buffer[(*index)++] = number >> 8;
+    buffer[(*index)++] = number;
+}
+
+/**
+ * @brief Appends a 32-bit integer to a buffer at the specified index.
+ *
+ * This function takes a 32-bit integer, splits it into four 8-bit values, and
+ * appends them to a buffer at the specified index. The index is then
+ * incremented by 4.
+ *
+ * @param buffer The buffer to which the integer will be appended. This buffer
+ * must be large enough to accommodate the appended values.
+ * @param number The 32-bit integer to be appended.
+ * @param index A pointer to the index at which the integer will be appended.
+ * The index is updated after appending the integer. This pointer must be valid
+ * and point to a valid memory location.
+ *
+ * @return void.
+ */
+void Utils::BufAppendInt32(uint8_t *buffer, int32_t number, int32_t *index)
+{
+    buffer[(*index)++] = number >> 24;
+    buffer[(*index)++] = number >> 16;
+    buffer[(*index)++] = number >> 8;
+    buffer[(*index)++] = number;
+}
+
+/**
+ * @brief Appends a 16-bit floating-point number to a buffer at the specified
+ * index, scaled by a given factor.
+ *
+ * This function takes a floating-point number, scales it by a given factor,
+ * converts it to a 16-bit integer, and appends the resulting integer to a
+ * buffer at the specified index. The index is then incremented by 2.
+ *
+ * @param buffer The buffer to which the scaled floating-point number will be
+ * appended.
+ * @param number The floating-point number to be appended.
+ * @param scale The factor by which the floating-point number will be scaled
+ * before being converted to a 16-bit integer.
+ * @param index A pointer to the index at which the scaled floating-point number
+ * will be appended. The index is updated after appending the number.
+ *
+ * @return void.
+ */
+void Utils::BufAppendFloat16(uint8_t *buffer, float number, float scale, int32_t *index)
+{
+    BufAppendInt16(buffer, (int16_t)(number * scale), index);
+}
+
+/**
+ * @brief Appends a 32-bit floating-point number to a buffer at the specified
+ * index, scaled by a given factor.
+ *
+ * This function takes a floating-point number, scales it by a given factor,
+ * converts it to a 32-bit integer, and appends the resulting integer to a
+ * buffer at the specified index. The index is then incremented by 4.
+ *
+ * @param buffer The buffer to which the scaled floating-point number will be
+ * appended. This buffer must be large enough to accommodate the appended
+ * values.
+ * @param number The floating-point number to be appended. This number will be
+ * multiplied by the scale factor before being converted to a 32-bit integer.
+ * @param scale The factor by which the floating-point number will be scaled
+ * before being converted to a 32-bit integer.
+ * @param index A pointer to the index at which the scaled floating-point number
+ * will be appended. The index is updated after appending the number. This
+ * pointer must be valid and point to a valid memory location.
+ *
+ * @return void.
+ */
+void Utils::BufAppendFloat32(uint8_t *buffer, float number, float scale, int32_t *index)
+{
+    BufAppendInt32(buffer, (int32_t)(number * scale), index);
+}
+
+std::string Utils::CurrentDateTimeStr(const char *fmt)
+{
+    time_t now = time(0);
+    struct tm tstruct;
+    char buf[80];
+    tstruct = *localtime(&now);
+    strftime(buf, sizeof(buf), fmt, &tstruct);
+    return buf;
+}
+
+/**
+ * @brief Enforces a rate (Hz) on a loop and returns the time elapsed since the
+ * last call.
+ *
+ * This function calculates the time elapsed since the last call and sleeps if
+ * necessary to enforce the specified rate. If the elapsed time is greater than
+ * the specified rate, it returns the elapsed time in seconds.
+ *
+ * @param rate The desired rate in Hz.
+ * @param start_time The time point from which to calculate the elapsed time.
+ *
+ * @return The time elapsed since the last call in seconds.
+ */
+double Utils::ScheduleRate(
+    int rate, std::chrono::high_resolution_clock::time_point start_time)
+{
+    int dt = std::chrono::duration_cast<std::chrono::milliseconds>(
+                 std::chrono::high_resolution_clock::now() - start_time)
+                 .count();
+    if (dt < 1000 / rate)
+    {
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(int(1000.0 / rate - dt - 2)));
+    }
+    else
+    {
+        return dt / 1000.0;
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::high_resolution_clock::now() - start_time)
+               .count() /
+           1000.0;
+}
+
+/*
+ *
+ *
+ */
+double Utils::NormalizeAnglePositive(double angle)
+{
+    return fmod(fmod(angle, (2.0 * M_PI)) + (2.0 * M_PI), (2.0 * M_PI));
+}
+
+double Utils::NormalizeAngle(double angle)
+{
+    double a = NormalizeAnglePositive(angle);
+    if (a > M_PI)
+        a -= (2.0 * M_PI);
+    return a;
+}
+
+double Utils::ShortestAngularDistance(double from, double to)
+{
+    double result = Utils::NormalizeAnglePositive(Utils::NormalizeAnglePositive(to) - Utils::NormalizeAnglePositive(from));
+    if (result > M_PI)
+        result = -((2.0 * M_PI) - result);
+    return Utils::NormalizeAngle(result);
+}
+-- ./src/utils.h --
+/**
+ * cpputil
+ *
+ * A collection of utilities that I have been copying
+ * from project-to-project for past ~5 years. Finally,
+ * it is time to serialize in a "library".
+ *
+ * This "library" owes much of its origin to my good
+ * friend Paul Bailey. He and I worked significantly
+ * with this code while working at NASA JSC.
+ *
+ * Justus Languell     https://www.linkedin.com/in/justusl/
+ * Paul Ryan Bailey    https://www.linkedin.com/in/paul-ryan-bailey/
+ */
+#ifndef __UTILCPP_H__
+#define __UTILCPP_H__
+
+#include <stdint.h>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
+#define _USE_MATH_DEFINES
+#include <sys/time.h>
+#include <cmath>
+
+#ifdef __GNUC__
+#define vsprintf_s vsnprintf
+#define sprintf_s snprintf
+#define _strdup strdup
+#define _snprintf std::snprintf
+#endif
+
+namespace Utils
+{
+    // typedef int64_t msec_t;
+
+    void BufAppendInt16(uint8_t *buffer, int16_t number, int32_t *index);
+    void BufAppendInt32(uint8_t *buffer, int32_t number, int32_t *index);
+    void BufAppendFloat16(uint8_t *buffer, float number, float scale, int32_t *index);
+    void BufAppendFloat32(uint8_t *buffer, float number, float scale, int32_t *index);
+
+    // Returns a YYYY-MM-DD HH:MM:SS format date for the current day.
+    std::string CurrentDateTimeStr(const char *fmt = "%Y-%m-%d %H:%M:%S");
+
+    // A function to extend the functionality of the Java
+    // Map interface's getOrDefault method to the C++ map.
+    // template<typename K, typename V>
+    template <typename K, typename V>
+    V MapGetOrDefault(const std::map<K, V> map, const K key, const V default_val)
+    {
+        auto it = map.find(key);
+        return it == map.end() ? default_val : it->second;
+    }
+
+    // A function to clamp a given value between an upper and lower bound
+    template <typename T>
+    T Clamp(T val, T upperBound, T lowerBound)
+    {
+        return std::min(std::max(val, lowerBound), upperBound);
+    }
+
+    // A constant expression function that converts std::string
+    // types to char* C strings in variatic argument lists. The
+    // function works by evaulating if a given type is of the
+    // std::string type. If so, it returns the result of .c_str(),
+    // otherwise, it just returns the param. This is designed to
+    // be used in variatic argument comprehention.
+    template <typename T>
+    auto _convert(T &&t)
+    {
+        if constexpr (std::is_same<std::remove_cv_t<std::remove_reference_t<T>>,
+                                   std::string>::value)
+            return std::forward<T>(t).c_str();
+        else
+            return std::forward<T>(t);
+    }
+
+    // Internal function to perform a C snprintf style format
+    // string. The problem with this function, the reason it's
+    // the internal function, is that it cannot take std::string
+    // types as arguments, only char* C strings. Wrapping this
+    // function solves this problem.
+    template <typename... A>
+    std::string _strfmt(const std::string &fmt, A &&...args)
+    {
+        const auto size =
+            _snprintf(nullptr, 0, fmt.c_str(), std::forward<A>(args)...) + 1;
+        if (size <= 0)
+            return "<StrFmt error>";
+        std::unique_ptr<char[]> buf(new char[size]);
+        _snprintf(buf.get(), size, fmt.c_str(), args...);
+        return std::string(buf.get(), buf.get() + size - 1);
+    }
+
+    // Formats a string the same way C snprintf does it,
+    // returning the formatted string. This method can take
+    // std::string objects as arguments (for the %s format).
+    template <typename... A>
+    std::string StrFmt(const std::string &fmt, A &&...args)
+    {
+        return _strfmt(fmt, _convert(std::forward<A>(args))...);
+    }
+
+    // Prints a string the same way C printf does it, however
+    // this method is modernized for C++, and can use std::string
+    // objects as arguments (for the %s format).
+    template <typename... A>
+    void PrintFmt(const std::string &fmt, A &&...args)
+    {
+        std::cout << _strfmt(fmt, _convert(std::forward<A>(args))...);
+    }
+
+    // The same as PrintFmt but has a newline appended to the end.
+    template <typename... A>
+    void PrintLnFmt(const std::string &fmt, A &&...args)
+    {
+        std::cout << _strfmt(fmt + "\n", _convert(std::forward<A>(args))...);
+    }
+
+    // This one also prints the time at the beginning b/c its a log
+    template <typename... A>
+    void LogFmt(const std::string &fmt, A &&...args)
+    {
+        std::cout << _strfmt("[" + CurrentDateTimeStr() + "] " + fmt + "\n",
+                             _convert(std::forward<A>(args))...);
+    }
+
+    // Handle errors.
+    template <typename... A>
+    void ErrFmt(const std::string &fmt, A &&...args)
+    {
+        std::cerr << _strfmt("[" + CurrentDateTimeStr() + "] " + fmt + "\n",
+                             _convert(std::forward<A>(args))...);
+        std::exit(1);
+    }
+
+    // Returns true if element x is present inside of the vector v.
+    template <typename T>
+    inline bool VecContains(const std::vector<T> v, const T x)
+    {
+        return std::find(v.begin(), v.end(), x) != v.end();
+    }
+
+    // Returns the index of element x if it is present inside of the
+    // vector v, otherwise returns -1.
+    template <typename T>
+    inline long VecIndexOf(const std::vector<T> v, const T x)
+    {
+        ptrdiff_t pos = find(v.begin(), v.end(), x) - v.begin();
+        if (pos >= v.size())
+            return -1;
+        return pos;
+    }
+
+    double ScheduleRate(int rate, std::chrono::high_resolution_clock::time_point start_time);
+
+    double NormalizeAnglePositive(double angle);
+    double NormalizeAngle(double angle);
+    double ShortestAngularDistance(double from, double to);
+
+    using t_us = std::chrono::microseconds;
+    using t_ms = std::chrono::milliseconds;
+
+    template <typename A, typename T>
+    inline A PreciseTime()
+    {
+        auto now = std::chrono::high_resolution_clock::now().time_since_epoch();
+        return static_cast<A>(std::chrono::duration_cast<T>(now).count());
+    }
+
+}; // namespace Utils
+
+#endif // __UTILCPP_H__
