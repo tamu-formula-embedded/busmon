@@ -9,8 +9,8 @@
 
 #include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
-#include <iostream>
 
 std::string CANFrame::Str() const
 {
@@ -22,9 +22,7 @@ std::string CANFrame::Str() const
 }
 
 CanInterface::CanInterface(const std::string &host, uint16_t port, bool verbose)
-    : host_(host), port_(port), verbose_(verbose)
-{
-}
+    : host_(host), port_(port), verbose_(verbose) {}
 
 CanInterface::~CanInterface() { Stop(); }
 
@@ -39,7 +37,6 @@ bool CanInterface::Connect()
     if (connected_.load())
         return true;
 
-    // Resolve host
     struct addrinfo hints{}, *res = nullptr;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
@@ -49,7 +46,7 @@ bool CanInterface::Connect()
     if (rc != 0 || !res)
     {
         if (verbose_)
-            std::cerr << "[can] resolve failed: " << gai_strerror(rc) << "\n";
+            fprintf(stderr, "[can] resolve failed: %s\n", gai_strerror(rc));
         return false;
     }
 
@@ -57,26 +54,25 @@ bool CanInterface::Connect()
     if (fd < 0)
     {
         if (verbose_)
-            std::cerr << "[can] socket(): " << strerror(errno) << "\n";
+            fprintf(stderr, "[can] socket(): %s\n", strerror(errno));
         freeaddrinfo(res);
         return false;
     }
 
-    // TCP_NODELAY + SO_KEEPALIVE to match the Java side
+    /* TCP_NODELAY + SO_KEEPALIVE to match the Java side */
     int flag = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
 
-    // Connect with a 3-second timeout via non-blocking + poll
-    // (simple blocking connect is fine for a CLI tool)
+    /* 3s connect timeout */
     struct timeval tv{3, 0};
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     if (::connect(fd, res->ai_addr, res->ai_addrlen) < 0)
     {
         if (verbose_)
-            std::cerr << "[can] connect to " << host_ << ":" << port_
-                      << " failed: " << strerror(errno) << "\n";
+            fprintf(stderr, "[can] connect to %s:%u failed: %s\n",
+                    host_.c_str(), port_, strerror(errno));
         ::close(fd);
         freeaddrinfo(res);
         return false;
@@ -87,7 +83,7 @@ bool CanInterface::Connect()
     connected_.store(true);
 
     if (verbose_)
-        std::cout << "[can] connected to " << host_ << ":" << port_ << "\n";
+        printf("[can] connected to %s:%u\n", host_.c_str(), port_);
 
     if (on_connect_)
         on_connect_();
@@ -140,6 +136,7 @@ bool CanInterface::SendFrame(uint32_t can_id, const uint8_t *data, uint8_t len)
     uint8_t ext = (can_id > 0x7FF) ? 0x80 : 0x00;
     pkt[0] = (len & 0x0F) | ext;
 
+    /* CAN ID, big-endian */
     pkt[1] = (can_id >> 24) & 0xFF;
     pkt[2] = (can_id >> 16) & 0xFF;
     pkt[3] = (can_id >> 8) & 0xFF;
@@ -152,7 +149,7 @@ bool CanInterface::SendFrame(uint32_t can_id, const uint8_t *data, uint8_t len)
     if (n != 13)
     {
         if (verbose_)
-            std::cerr << "[can] send failed: " << strerror(errno) << "\n";
+            fprintf(stderr, "[can] send failed: %s\n", strerror(errno));
         Disconnect();
         return false;
     }
@@ -166,7 +163,7 @@ bool CanInterface::ReadFully(uint8_t *buf, size_t len)
     {
         ssize_t n = ::recv(sockfd_, buf + off, len - off, 0);
         if (n <= 0)
-            return false; // EOF or error
+            return false;
         off += n;
     }
     return true;
@@ -181,28 +178,26 @@ void CanInterface::RxLoop()
         if (!ReadFully(buf, 13))
         {
             if (running_.load() && verbose_)
-                std::cerr << "[can] rx: connection lost\n";
+                fprintf(stderr, "[can] rx: connection lost\n");
             break;
         }
 
-        // Decode — mirrors Java EthInterface.handle()
-        // uint8_t header = buf[0];
+        /* Decode -- mirrors Java EthInterface.handle() */
         uint32_t can_id = ((uint32_t)buf[1] << 24) | ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 8) | ((uint32_t)buf[4]);
 
         uint8_t data[8];
         std::memcpy(data, buf + 5, 8);
 
-        CANFrame pkt(can_id, data);
-
+        CANFrame frame(can_id, data);
         auto now = std::chrono::steady_clock::now().time_since_epoch();
-        pkt.timestamp = static_cast<uint32_t>(
+        frame.timestamp = static_cast<uint32_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
 
         if (verbose_)
-            std::cout << "[can] rx " << pkt.Str() << "\n";
+            printf("[can] rx %s\n", frame.Str().c_str());
 
         if (on_frame_)
-            on_frame_(pkt);
+            on_frame_(frame);
     }
 
     Disconnect();

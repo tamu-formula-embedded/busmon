@@ -6,40 +6,38 @@ void RenderTable(const DisplayState &state, const PacketMapper &mapper, uint64_t
 {
     Term::Home();
 
-    // Header
     Term::Bold();
     Term::Cyan();
-    std::printf("  busmon");
+    printf("  busmon");
     Term::Reset();
     Term::Dim();
-    std::printf("  —  CAN bus monitor\n");
+    printf("  —  CAN bus monitor\n");
     Term::Reset();
 
-    // Status bar
+    /* Connection status bar */
     if (state.connected)
     {
         Term::Green();
-        std::printf("  ● CONNECTED");
+        printf("  ● CONNECTED");
     }
     else
     {
         Term::Red();
-        std::printf("  ● DISCONNECTED");
+        printf("  ● DISCONNECTED");
     }
     Term::Reset();
     Term::Dim();
-    std::printf("    rx: %-8lu   uptime: %.1fs",
-                (unsigned long)state.rx_count, uptime_ms / 1000.0);
+    printf("    rx: %-8lu   uptime: %.1fs",
+           (unsigned long)state.rx_count, uptime_ms / 1000.0);
     Term::Reset();
-    std::printf("\n\n");
+    printf("\n\n");
 
-    // Table header
+    /* Table header */
     Term::Bold();
-    std::printf("  %-24s %14s  %-8s  %10s\n",
-                "IDENTIFIER", "VALUE", "UNIT", "AGE (ms)");
+    printf("  %-24s %14s  %-8s  %10s\n", "IDENTIFIER", "VALUE", "UNIT", "AGE (ms)");
     Term::Reset();
     Term::Dim();
-    std::printf("  ────────────────────────────────────────────────────────────\n");
+    printf("  ────────────────────────────────────────────────────────────\n");
     Term::Reset();
 
     uint32_t now_ms = static_cast<uint32_t>(
@@ -47,6 +45,7 @@ void RenderTable(const DisplayState &state, const PacketMapper &mapper, uint64_t
             std::chrono::steady_clock::now().time_since_epoch())
             .count());
 
+    /* One row per mapped field, ordered by CAN ID */
     for (const auto &[can_id, submappings] : mapper.GetMappings())
     {
         for (const auto &mapping : submappings)
@@ -57,11 +56,11 @@ void RenderTable(const DisplayState &state, const PacketMapper &mapper, uint64_t
                 const MappedPacket &mp = it->second;
                 uint32_t age = now_ms - mp.timestamp;
 
-                std::printf("  %-24s ", mapping.identifier.c_str());
+                printf("  %-24s ", mapping.identifier.c_str());
                 Term::Bold();
-                std::printf("%14.4f", mp.value);
+                printf("%14.4f", mp.value);
                 Term::Reset();
-                std::printf("  %-8s  ", mapping.unit.c_str());
+                printf("  %-8s  ", mapping.unit.c_str());
 
                 if (age < 500)
                     Term::Green();
@@ -69,22 +68,22 @@ void RenderTable(const DisplayState &state, const PacketMapper &mapper, uint64_t
                     Term::Yellow();
                 else
                     Term::Red();
-                std::printf("%8u ms", age);
+                printf("%8u ms", age);
                 Term::Reset();
-                std::printf("\n");
+                printf("\n");
             }
             else
             {
                 Term::Dim();
-                std::printf("  %-24s %14s  %-8s  %10s\n",
-                            mapping.identifier.c_str(), "---",
-                            mapping.unit.c_str(), "---");
+                printf("  %-24s %14s  %-8s  %10s\n",
+                       mapping.identifier.c_str(), "---", mapping.unit.c_str(), "---");
                 Term::Reset();
             }
         }
     }
 
+    /* Padding to clear ghost rows from previous renders */
     for (int i = 0; i < 4; i++)
-        std::printf("%-72s\n", "");
-    std::fflush(stdout);
+        printf("%-72s\n", "");
+    fflush(stdout);
 }

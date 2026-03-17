@@ -1,6 +1,12 @@
-// busmon — CAN bus monitor with live terminal display
-//
-// Usage:  busmon -f mappings.txt [-h host] [-p port] [-r rate_hz] [-v]
+/**
+ * busmon — CAN bus monitor with live terminal display
+ *
+ * Connects to a CAN-to-Ethernet bridge over TCP, decodes
+ * frames using a mapping config file, and renders a
+ * continuously-updating table in the terminal.
+ *
+ * Usage:  busmon -f mappings.txt [-h host] [-p port] [-r hz] [-v]
+ */
 
 #include "can_interface.h"
 #include "display.h"
@@ -10,7 +16,6 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
-#include <iostream>
 #include <signal.h>
 #include <thread>
 
@@ -32,51 +37,51 @@ struct Args
 
 static void PrintUsage(const char *argv0)
 {
-    std::fprintf(stderr,
-                 "Usage: %s -f <mappings.txt> [options]\n"
-                 "\n"
-                 "Options:\n"
-                 "  -f <path>    Packet mapping config file (required)\n"
-                 "  -h <host>    CAN bridge host  [%s]\n"
-                 "  -p <port>    CAN bridge port  [%u]\n"
-                 "  -r <hz>      Display refresh rate  [%d]\n"
-                 "  -v           Verbose CAN traffic logging\n",
-                 argv0, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_HZ);
+    fprintf(stderr,
+            "Usage: %s -f <mappings.txt> [options]\n"
+            "\n"
+            "Options:\n"
+            "  -f <path>    Packet mapping config file (required)\n"
+            "  -h <host>    CAN bridge host  [%s]\n"
+            "  -p <port>    CAN bridge port  [%u]\n"
+            "  -r <hz>      Display refresh rate  [%d]\n"
+            "  -v           Verbose CAN traffic logging\n",
+            argv0, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_HZ);
 }
 
 static bool ParseArgs(int argc, char **argv, Args &args)
 {
     for (int i = 1; i < argc; i++)
     {
-        if (std::strcmp(argv[i], "-f") == 0 && i + 1 < argc)
+        if (strcmp(argv[i], "-f") == 0 && i + 1 < argc)
         {
             args.config_path = argv[++i];
         }
-        else if (std::strcmp(argv[i], "-h") == 0 && i + 1 < argc)
+        else if (strcmp(argv[i], "-h") == 0 && i + 1 < argc)
         {
             args.host = argv[++i];
         }
-        else if (std::strcmp(argv[i], "-p") == 0 && i + 1 < argc)
+        else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc)
         {
-            args.port = static_cast<uint16_t>(std::atoi(argv[++i]));
+            args.port = static_cast<uint16_t>(atoi(argv[++i]));
         }
-        else if (std::strcmp(argv[i], "-r") == 0 && i + 1 < argc)
+        else if (strcmp(argv[i], "-r") == 0 && i + 1 < argc)
         {
-            args.hz = std::atoi(argv[++i]);
+            args.hz = atoi(argv[++i]);
         }
-        else if (std::strcmp(argv[i], "-v") == 0)
+        else if (strcmp(argv[i], "-v") == 0)
         {
             args.verbose = true;
         }
         else
         {
-            std::fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            fprintf(stderr, "Unknown option: %s\n", argv[i]);
             return false;
         }
     }
     if (args.config_path.empty())
     {
-        std::fprintf(stderr, "Error: -f <mappings.txt> is required\n\n");
+        fprintf(stderr, "Error: -f <mappings.txt> is required\n\n");
         return false;
     }
     return true;
@@ -91,25 +96,25 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* Load packet mappings from config */
     PacketMapper mapper;
     if (!mapper.LoadMappings(args.config_path))
     {
-        std::cerr << "Failed to load mappings from " << args.config_path << "\n";
+        fprintf(stderr, "Failed to load mappings from %s\n", args.config_path.c_str());
         return 1;
     }
 
     if (args.verbose)
-        std::cout << "Loaded mappings:\n"
-                  << mapper.Str() << "\n";
+        printf("Loaded mappings:\n%s\n", mapper.Str().c_str());
 
     DisplayState display;
-
     CanInterface can(args.host, args.port, args.verbose);
 
-    can.SetOnFrame([&](const CANFrame &pkt)
+    /* Decode incoming frames and push to display state */
+    can.SetOnFrame([&](const CANFrame &frame)
                    {
         std::vector<MappedPacket> updated;
-        mapper.MapPacket(pkt, updated);
+        mapper.MapPacket(frame, updated);
 
         std::lock_guard<std::mutex> lock(display.mu);
         display.rx_count++;
@@ -131,6 +136,7 @@ int main(int argc, char **argv)
 
     can.Start();
 
+    /* Render loop */
     auto t0 = std::chrono::steady_clock::now();
     Term::HideCursor();
     Term::Clear();
@@ -151,7 +157,7 @@ int main(int argc, char **argv)
 
     Term::ShowCursor();
     Term::Reset();
-    std::printf("\nbusmon: shutting down\n");
+    printf("\nbusmon: shutting down\n");
 
     can.Stop();
     return 0;

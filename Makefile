@@ -11,7 +11,7 @@ BUILD_DIR ?= ./bin
 SRC_DIRS ?= ./src ./lib
 endif
 
-TARGET_EXEC ?= telemetrycore 
+TARGET_EXEC ?= busmon 
 
 
 C_V ?= 17

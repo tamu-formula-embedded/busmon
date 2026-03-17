@@ -1,0 +1,29 @@
+0x0D3 {
+    apps1Raw = 1:2,
+    apps2Raw = 3:4,
+    bppRaw = 5:6
+}
+
+0x0D4 {
+    rxFrames = 1:4,
+    rxFramesUnmatched = 5:8
+}
+
+0x0D5 {
+    apps1Val = 1:2,
+    apps2Val = 3:4,
+    bseMv = 5:6 (mV),
+    appsAvg = 7:8
+}
+
+0x0D6 {
+    btnPressed = 1:2,
+    sdcClosed = 3:4,
+    bppDepressed = 5:6,
+    drvEn = 7:8
+}
+
+0x0D7 {
+    appsPl = 1:2,
+    bppPl = 3:4
+}
