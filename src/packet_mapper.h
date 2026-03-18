@@ -29,7 +29,9 @@ struct PacketMapping
     std::string identifier;
     uint64_t    coef;
     std::string unit;
-    bool        negable{true};
+    bool        negable{false};
+    bool        is_little_endian{false};
+    bool        is_float{false};
 
     PacketMapping(size_t start, size_t end, const std::string& identifier, uint64_t coef,
                   const std::string& unit)
@@ -109,6 +111,9 @@ class PacketMapper
      */
     bool ExpectRange(fileiter& it, fileiter end, uint8_t& first, uint8_t& last);
 
+    bool ExpectFlag(fileiter& it, fileiter end, bool& is_negable, bool& is_little_endian,
+                    bool& is_float);
+
     /**
      * Parses an identifier token.
      * First char must be a-z or A-Z, subsequent chars may
@@ -152,7 +157,7 @@ public:
             printf("%u:%s:%f\n", mp.timestamp, mp.identifier.c_str(), mp.value);
     }
 
-    PacketMapper(){};
+    PacketMapper() {};
 };
 
 #endif

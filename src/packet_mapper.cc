@@ -103,6 +103,28 @@ bool PacketMapper::ExpectRange(fileiter& it, fileiter end, uint8_t& first, uint8
     return BadEOF();
 }
 
+bool PacketMapper::ExpectFlag(fileiter& it, fileiter end, bool& is_negable, bool& is_little_endian,
+                              bool& is_float)
+{
+    while (it != end && between(*it, 'a', 'z'))
+    {
+        std::string kw;
+        while (it != end && between(*it, 'a', 'z')) kw += *it++;
+
+        if (is_whitespace(*it)) IterWS(it);
+
+        if (kw == "signed") is_negable = true;
+        else if (kw == "little") is_little_endian = true;
+        else if (kw == "float") is_float = true;
+        else
+        {
+            printf("uknnown keyword bro bro: %s\n", kw.c_str());
+            return false;
+        }
+    }
+    return true;
+}
+
 bool PacketMapper::ExpectIdentifier(fileiter& it, fileiter end, std::string& identifier)
 {
     if (it == end) return BadEOF();
@@ -175,6 +197,9 @@ bool PacketMapper::LoadMappings(const std::string& path)
             uint8_t first, last;
             if (!ExpectRange(it, end, first, last)) return false;
 
+            bool is_negable = false, is_little_endian = false, is_float = false;
+            if (!ExpectFlag(it, end, is_negable, is_little_endian, is_float)) return false;
+
             uint64_t coef = 1;
             if (*it == '/')
             {
@@ -202,6 +227,9 @@ bool PacketMapper::LoadMappings(const std::string& path)
             }
 
             PacketMapping mapping{first, last, identifier, coef, unit};
+            mapping.negable          = is_negable;
+            mapping.is_little_endian = is_little_endian;
+            mapping.is_float         = is_float;
             mappings.push_back(mapping);
 
             if (*it == '}')
@@ -233,14 +261,52 @@ void PacketMapper::MapPacket(const CANFrame& packet, std::vector<MappedPacket>& 
     {
         int64_t extracted = 0;
         int     width     = mapping.end - mapping.start;
-        for (int i = mapping.start, j = 0; i <= (int)mapping.end; i++)
-        {
-            extracted |= (int64_t)packet.data[i] << (8 * (width - (j++)));
-        }
-        if (mapping.negable && ((int8_t)packet.data[mapping.start] < 0)) extracted = -extracted;
 
-        double adjusted = extracted / (double)mapping.coef;
-        auto   mp       = MappedPacket(mapping.identifier, adjusted, packet.timestamp);
+        // handle endianness flag
+        if (mapping.is_little_endian)
+        {
+            for (int i = mapping.start, j = 0; i <= (int)mapping.end; i++)
+            {
+                extracted |= (int64_t)packet.data[i] << (8 * (j++));
+            }
+        }
+        else
+        {
+            for (int i = mapping.start, j = 0; i <= (int)mapping.end; i++)
+            {
+                extracted |= (int64_t)packet.data[i] << (8 * (width - (j++)));
+            }
+        }
+
+        // handle float flag
+        double adjusted_num;
+        if (mapping.is_float)
+        {
+            if (width + 1 == 4)
+            {
+                float f;
+                std::memcpy(&f, &extracted, sizeof(float));
+                adjusted_num = f / (double)mapping.coef;
+            }
+            else if (width + 1 == 8)
+            {
+                double d;
+                std::memcpy(&d, &extracted, sizeof(double));
+                adjusted_num = d / (double)mapping.coef;
+            }
+            else
+            {
+                // invalid float width they shouldn't have put float
+                continue;
+            }
+        }
+        else
+        {
+            if (mapping.negable && ((int8_t)packet.data[mapping.start] < 0)) extracted = -extracted;
+            adjusted_num = extracted / (double)mapping.coef;
+        }
+
+        auto mp = MappedPacket(mapping.identifier, adjusted_num, packet.timestamp);
         values.insert_or_assign(mapping.identifier, mp);
         vec.push_back(mp);
     }
