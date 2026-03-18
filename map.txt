@@ -27,3 +27,40 @@
     appsPl = 1:2,
     bppPl = 3:4
 }
+
+
+0x401 {
+    erpm = 1:4
+}
+
+0x01C {
+    bmsIters = 1:4
+}
+
+0x521 {
+    ivtCurrent = 3:6
+}
+
+0x522 {
+    ivtVoltage1 = 3:4
+}
+
+0x523 {
+    ivtVoltage2 = 3:4
+}
+
+0x524 {
+    ivtVoltage3 = 3:4
+}
+
+0x526 {
+    ivtPower = 3:4
+}
+
+0x527 {
+    ivtCharge = 3:4
+}
+
+0x528 {
+    ivtEnergy = 3:4
+}
