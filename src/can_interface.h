@@ -19,11 +19,13 @@
 struct CANFrame
 {
     uint32_t id;
-    uint8_t data[8];
+    uint8_t  data[8];
     uint32_t timestamp; // ms since epoch, filled on receipt
 
-    CANFrame() : id(0), data{}, timestamp(0) {}
-    CANFrame(uint32_t id, const uint8_t *d) : id(id), timestamp(0)
+    CANFrame() : id(0), data{}, timestamp(0)
+    {
+    }
+    CANFrame(uint32_t id, const uint8_t* d) : id(id), timestamp(0)
     {
         std::memcpy(data, d, 8);
     }
@@ -31,8 +33,8 @@ struct CANFrame
     std::string Str() const;
 };
 
-using FrameCallback = std::function<void(const CANFrame &)>;
-using ConnectCallback = std::function<void()>;
+using FrameCallback      = std::function<void(const CANFrame&)>;
+using ConnectCallback    = std::function<void()>;
 using DisconnectCallback = std::function<void()>;
 
 /**
@@ -43,11 +45,11 @@ using DisconnectCallback = std::function<void()>;
 class CanInterface
 {
 public:
-    CanInterface(const std::string &host, uint16_t port, bool verbose = false);
+    CanInterface(const std::string& host, uint16_t port, bool verbose = false);
     ~CanInterface();
 
-    CanInterface(const CanInterface &) = delete;
-    CanInterface &operator=(const CanInterface &) = delete;
+    CanInterface(const CanInterface&)            = delete;
+    CanInterface& operator=(const CanInterface&) = delete;
 
     void SetOnFrame(FrameCallback cb);
     void SetOnConnect(ConnectCallback cb);
@@ -64,27 +66,27 @@ public:
     bool IsConnected() const;
 
     /** Pack and send a CAN frame over the wire */
-    bool SendFrame(uint32_t can_id, const uint8_t *data, uint8_t len = 8);
+    bool SendFrame(uint32_t can_id, const uint8_t* data, uint8_t len = 8);
 
 private:
     /** Read loop: blocks on recv, decodes frames, fires on_frame_ */
     void RxLoop();
 
     /** Reads exactly len bytes from the socket, returns false on EOF/error */
-    bool ReadFully(uint8_t *buf, size_t len);
+    bool ReadFully(uint8_t* buf, size_t len);
 
     std::string host_;
-    uint16_t port_;
-    bool verbose_;
-    int sockfd_{-1};
+    uint16_t    port_;
+    bool        verbose_;
+    int         sockfd_{-1};
 
     std::atomic<bool> running_{false};
     std::atomic<bool> connected_{false};
-    std::thread rx_thread_;
-    std::mutex write_mu_;
+    std::thread       rx_thread_;
+    std::mutex        write_mu_;
 
-    FrameCallback on_frame_;
-    ConnectCallback on_connect_;
+    FrameCallback      on_frame_;
+    ConnectCallback    on_connect_;
     DisconnectCallback on_disconnect_;
 };
 

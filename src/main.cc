@@ -19,23 +19,26 @@
 #include <signal.h>
 #include <thread>
 
-static constexpr const char *DEFAULT_HOST = "192.168.0.20";
-static constexpr uint16_t DEFAULT_PORT = 10001;
-static constexpr int DEFAULT_HZ = 10;
+static constexpr const char* DEFAULT_HOST = "192.168.0.20";
+static constexpr uint16_t    DEFAULT_PORT = 10001;
+static constexpr int         DEFAULT_HZ   = 10;
 
 static std::atomic<bool> g_running{true};
-static void SigHandler(int) { g_running.store(false); }
+static void              SigHandler(int)
+{
+    g_running.store(false);
+}
 
 struct Args
 {
     std::string config_path;
-    std::string host = DEFAULT_HOST;
-    uint16_t port = DEFAULT_PORT;
-    int hz = DEFAULT_HZ;
-    bool verbose = false;
+    std::string host    = DEFAULT_HOST;
+    uint16_t    port    = DEFAULT_PORT;
+    int         hz      = DEFAULT_HZ;
+    bool        verbose = false;
 };
 
-static void PrintUsage(const char *argv0)
+static void PrintUsage(const char* argv0)
 {
     fprintf(stderr,
             "Usage: %s -f <mappings.txt> [options]\n"
@@ -49,7 +52,7 @@ static void PrintUsage(const char *argv0)
             argv0, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_HZ);
 }
 
-static bool ParseArgs(int argc, char **argv, Args &args)
+static bool ParseArgs(int argc, char** argv, Args& args)
 {
     for (int i = 1; i < argc; i++)
     {
@@ -87,7 +90,7 @@ static bool ParseArgs(int argc, char **argv, Args &args)
     return true;
 }
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     Args args;
     if (!ParseArgs(argc, argv, args))
@@ -104,32 +107,36 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (args.verbose)
-        printf("Loaded mappings:\n%s\n", mapper.Str().c_str());
+    if (args.verbose) printf("Loaded mappings:\n%s\n", mapper.Str().c_str());
 
     DisplayState display;
     CanInterface can(args.host, args.port, args.verbose);
 
     /* Decode incoming frames and push to display state */
-    can.SetOnFrame([&](const CANFrame &frame)
-                   {
-        std::vector<MappedPacket> updated;
-        mapper.MapPacket(frame, updated);
+    can.SetOnFrame(
+            [&](const CANFrame& frame)
+            {
+                std::vector<MappedPacket> updated;
+                mapper.MapPacket(frame, updated);
 
-        std::lock_guard<std::mutex> lock(display.mu);
-        display.rx_count++;
-        for (auto& mp : updated)
-            display.values.insert_or_assign(mp.identifier, mp); });
+                std::lock_guard<std::mutex> lock(display.mu);
+                display.rx_count++;
+                for (auto& mp : updated) display.values.insert_or_assign(mp.identifier, mp);
+            });
 
-    can.SetOnConnect([&]()
-                     {
-        std::lock_guard<std::mutex> lock(display.mu);
-        display.connected = true; });
+    can.SetOnConnect(
+            [&]()
+            {
+                std::lock_guard<std::mutex> lock(display.mu);
+                display.connected = true;
+            });
 
-    can.SetOnDisconnect([&]()
-                        {
-        std::lock_guard<std::mutex> lock(display.mu);
-        display.connected = false; });
+    can.SetOnDisconnect(
+            [&]()
+            {
+                std::lock_guard<std::mutex> lock(display.mu);
+                display.connected = false;
+            });
 
     signal(SIGINT, SigHandler);
     signal(SIGTERM, SigHandler);
@@ -144,8 +151,8 @@ int main(int argc, char **argv)
     while (g_running.load())
     {
         uint64_t uptime = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              std::chrono::steady_clock::now() - t0)
-                              .count();
+                                  std::chrono::steady_clock::now() - t0)
+                                  .count();
 
         {
             std::lock_guard<std::mutex> lock(display.mu);
