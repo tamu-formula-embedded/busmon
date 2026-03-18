@@ -32,6 +32,7 @@ struct Args
     std::string host = DEFAULT_HOST;
     uint16_t port = DEFAULT_PORT;
     int hz = DEFAULT_HZ;
+    bool setivt = false;
     bool verbose = false;
 };
 
@@ -45,6 +46,7 @@ static void PrintUsage(const char *argv0)
             "  -h <host>    CAN bridge host  [%s]\n"
             "  -p <port>    CAN bridge port  [%u]\n"
             "  -r <hz>      Display refresh rate  [%d]\n"
+            "  --setivt     Sets the IVT to 1MBaud\n"
             "  -v           Verbose CAN traffic logging\n",
             argv0, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_HZ);
 }
@@ -68,6 +70,10 @@ static bool ParseArgs(int argc, char **argv, Args &args)
         else if (strcmp(argv[i], "-r") == 0 && i + 1 < argc)
         {
             args.hz = atoi(argv[++i]);
+        }
+        else if (strcmp(argv[i], "--setivt") == 0) 
+        {
+            args.setivt = true;
         }
         else if (strcmp(argv[i], "-v") == 0)
         {
@@ -115,7 +121,7 @@ int main(int argc, char **argv)
                    {
         std::vector<MappedPacket> updated;
         mapper.MapPacket(frame, updated);
-
+        // printf("%x\n", frame.id);
         std::lock_guard<std::mutex> lock(display.mu);
         display.rx_count++;
         for (auto& mp : updated)
@@ -135,6 +141,14 @@ int main(int argc, char **argv)
     signal(SIGTERM, SigHandler);
 
     can.Start();
+
+    if (args.setivt) {
+        uint8_t ivtframe[] = {0x3A, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+        while(!can.SendFrame(0x411, ivtframe , 8));
+        printf("Set IVT Bitrate! :D\n");
+        can.Stop();
+        return 0;
+    }
 
     /* Render loop */
     auto t0 = std::chrono::steady_clock::now();
