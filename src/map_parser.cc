@@ -1,5 +1,4 @@
-#include "packet_mapper.h"
-#include "can_interface.h"
+#include "map_parser.h"
 
 bool is_whitespace(const char ch)
 {
@@ -11,13 +10,13 @@ bool between(const char ch, const char min, const char max)
     return ch >= min && ch <= max;
 }
 
-std::string PacketMapping::Str()
+std::string FrameMapping::Str()
 {
-    return Utils::StrFmt("PacketMapping{ range=%d:%d identifier=%s coef=%d unit=%s }", start, end,
+    return Utils::StrFmt("FrameMapping{ range=%d:%d identifier=%s coef=%d unit=%s }", start, end,
                          identifier, coef, unit);
 }
 
-bool PacketMapper::ExpectID(fileiter& it, fileiter end, uint32_t& id)
+bool FrameMapParser::ExpectID(fileiter& it, fileiter end, uint32_t& id)
 {
     id = 0;
     if (*it == '0')
@@ -86,7 +85,7 @@ bool PacketMapper::ExpectID(fileiter& it, fileiter end, uint32_t& id)
     }
 }
 
-bool PacketMapper::ExpectRange(fileiter& it, fileiter end, uint8_t& first, uint8_t& last)
+bool FrameMapParser::ExpectRange(fileiter& it, fileiter end, uint8_t& first, uint8_t& last)
 {
     while (it != end)
     {
@@ -103,8 +102,8 @@ bool PacketMapper::ExpectRange(fileiter& it, fileiter end, uint8_t& first, uint8
     return BadEOF();
 }
 
-bool PacketMapper::ExpectFlag(fileiter& it, fileiter end, bool& is_negable, bool& is_little_endian,
-                              bool& is_float)
+bool FrameMapParser::ExpectFlag(fileiter& it, fileiter end, bool& is_negable,
+                                bool& is_little_endian, bool& is_float)
 {
     while (it != end && between(*it, 'a', 'z'))
     {
@@ -125,7 +124,7 @@ bool PacketMapper::ExpectFlag(fileiter& it, fileiter end, bool& is_negable, bool
     return true;
 }
 
-bool PacketMapper::ExpectIdentifier(fileiter& it, fileiter end, std::string& identifier)
+bool FrameMapParser::ExpectIdentifier(fileiter& it, fileiter end, std::string& identifier)
 {
     if (it == end) return BadEOF();
     if (!between(*it, 'a', 'z') && !between(*it, 'A', 'Z')) return Unexpected("a-z or A-Z", *it);
@@ -144,7 +143,7 @@ bool PacketMapper::ExpectIdentifier(fileiter& it, fileiter end, std::string& ide
     return BadEOF();
 }
 
-bool PacketMapper::ExpectCoef(fileiter& it, fileiter end, uint64_t& coef)
+bool FrameMapParser::ExpectCoef(fileiter& it, fileiter end, uint64_t& coef)
 {
     coef = 0;
     while (it != end)
@@ -164,7 +163,7 @@ bool PacketMapper::ExpectCoef(fileiter& it, fileiter end, uint64_t& coef)
     return coef != 0; /* coef must be non-zero; 0 also indicates parse failure */
 }
 
-bool PacketMapper::LoadMappings(const std::string& path)
+bool FrameMapParser::LoadMappings(const std::string& path)
 {
     std::ifstream file(path);
     if (!file)
@@ -185,7 +184,7 @@ bool PacketMapper::LoadMappings(const std::string& path)
         if (*it != '{') return Unexpected("{", *it);
         else IterWS(it);
 
-        std::vector<PacketMapping> mappings;
+        std::vector<FrameMapping> mappings;
         while (it != end)
         {
             std::string identifier;
@@ -226,7 +225,7 @@ bool PacketMapper::LoadMappings(const std::string& path)
                 }
             }
 
-            PacketMapping mapping{first, last, identifier, coef, unit};
+            FrameMapping mapping{first, last, identifier, coef, unit};
             mapping.negable          = is_negable;
             mapping.is_little_endian = is_little_endian;
             mapping.is_float         = is_float;
@@ -250,83 +249,4 @@ bool PacketMapper::LoadMappings(const std::string& path)
         this->mappings[can_id] = mappings;
     }
     return true;
-}
-
-void PacketMapper::MapPacket(const CANFrame& packet, std::vector<MappedPacket>& vec)
-{
-    auto it = mappings.find(packet.id);
-    if (it == mappings.end()) return;
-
-    for (const PacketMapping& mapping : it->second)
-    {
-        int64_t extracted = 0;
-        int     width     = mapping.end - mapping.start;
-
-        // handle endianness flag
-        if (mapping.is_little_endian)
-        {
-            for (int i = mapping.start, j = 0; i <= (int)mapping.end; i++)
-            {
-                extracted |= (int64_t)packet.data[i] << (8 * (j++));
-            }
-        }
-        else
-        {
-            for (int i = mapping.start, j = 0; i <= (int)mapping.end; i++)
-            {
-                extracted |= (int64_t)packet.data[i] << (8 * (width - (j++)));
-            }
-        }
-
-        // handle float flag
-        double adjusted_num;
-        if (mapping.is_float)
-        {
-            if (width + 1 == 4)
-            {
-                float f;
-                std::memcpy(&f, &extracted, sizeof(float));
-                adjusted_num = f / (double)mapping.coef;
-            }
-            else if (width + 1 == 8)
-            {
-                double d;
-                std::memcpy(&d, &extracted, sizeof(double));
-                adjusted_num = d / (double)mapping.coef;
-            }
-            else
-            {
-                // invalid float width they shouldn't have put float
-                continue;
-            }
-        }
-        else
-        {
-            if (mapping.negable && ((int8_t)packet.data[mapping.start] < 0)) extracted = -extracted;
-            adjusted_num = extracted / (double)mapping.coef;
-        }
-
-        auto mp = MappedPacket(mapping.identifier, adjusted_num, packet.timestamp);
-        values.insert_or_assign(mapping.identifier, mp);
-        vec.push_back(mp);
-    }
-}
-
-std::string PacketMapper::Str()
-{
-    std::string d = "[\n";
-    for (const auto& [can_id, submappings] : mappings)
-    {
-        d += Utils::StrFmt("  Mapping{ can_id=%04x submappings={\n", can_id);
-        for (auto submapping : submappings) d += "    " + submapping.Str() + "\n";
-        d += "  } }\n";
-    }
-    d += "]\n";
-    return d;
-}
-
-void PacketMapper::LogState(std::ofstream& file, uint64_t global_start_time)
-{
-    file << "@" << Utils::PreciseTime<uint32_t, Utils::t_ms>() - global_start_time << "\n";
-    for (const auto& [key, mp] : values) file << key << "=" << mp.value << "\n";
 }

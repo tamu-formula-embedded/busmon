@@ -1,5 +1,5 @@
-#ifndef _PACKET_MAPPER_H_
-#define _PACKET_MAPPER_H_
+#ifndef _MAP_PARSER_
+#define _MAP_PARSER_
 
 #include <cstdint>
 #include <cstdio>
@@ -10,7 +10,7 @@
 
 #include "utils.h"
 
-struct CANFrame; // forward declaration, defined in can_interface.h
+struct CANFrame;
 
 bool is_whitespace(const char ch);
 
@@ -22,7 +22,7 @@ bool between(const char ch, const char min, const char max);
  * Maps a byte range [start, end] to a named identifier,
  * with an optional divisor (coef) and unit string.
  */
-struct PacketMapping
+struct FrameMapping
 {
     size_t      start;
     size_t      end;
@@ -33,8 +33,8 @@ struct PacketMapping
     bool        is_little_endian{false};
     bool        is_float{false};
 
-    PacketMapping(size_t start, size_t end, const std::string& identifier, uint64_t coef,
-                  const std::string& unit)
+    FrameMapping(size_t start, size_t end, const std::string& identifier, uint64_t coef,
+                 const std::string& unit)
         : start(start), end(end), identifier(identifier), coef(coef), unit(unit)
     {
     }
@@ -43,38 +43,16 @@ struct PacketMapping
 };
 
 /**
- * The result of mapping a CANFrame to a human-readable value.
- * Produced by PacketMapper::MapPacket and used for display
- * and network transmission.
- */
-struct MappedPacket
-{
-    std::string identifier;
-    double      value;
-    uint32_t    timestamp;
-
-    MappedPacket(std::string identifier, double value, uint32_t timestamp)
-        : identifier(identifier), value(value), timestamp(timestamp)
-    {
-    }
-};
-
-/**
- * Parses a mapping config file and uses it to decode raw
- * CAN frames into named, human-readable values.
  *
- * Config file format:
- *   0xID {
- *       name = start:end [/ divisor] [(unit)],
- *       ...
- *   }
  */
-class PacketMapper
+class FrameMapParser
 {
     using fileiter = std::istreambuf_iterator<char>;
 
+    using FrameMappings = std::map<uint32_t, std::vector<FrameMapping>>;
+
     /* treemap is intentional -- bounded to human-comprehensible size n */
-    std::map<uint32_t, std::vector<PacketMapping>> mappings{};
+    FrameMappings mappings{};
 
     /** Advance iterator past the current char and any trailing whitespace */
     inline char IterWS(fileiter& it)
@@ -125,39 +103,14 @@ class PacketMapper
     bool ExpectCoef(fileiter& it, fileiter end, uint64_t& coef);
 
 public:
-    /** Most recent value for each identifier, updated by MapPacket */
-    std::map<std::string, MappedPacket> values{};
-
     /** Parse the mapping config from a file */
     bool LoadMappings(const std::string& path);
 
-    /**
-     * Decode a CAN frame using the loaded mappings.
-     * Writes results to both the internal values map
-     * and the provided output vector.
-     */
-    void MapPacket(const CANFrame& packet, std::vector<MappedPacket>& vec);
-
-    /** Returns the mapping tree (for iteration by display code) */
-    inline const std::map<uint32_t, std::vector<PacketMapping>>& GetMappings() const
+    /** Returns the mapping tree */
+    inline const FrameMappings GetMappings() const
     {
         return mappings;
     }
-
-    /** Debug string representation of all loaded mappings */
-    std::string Str();
-
-    /** Write a timestamped snapshot of all current values to a log file */
-    void LogState(std::ofstream& file, uint64_t global_start_time);
-
-    /** Print all current values to stdout */
-    inline void PrintState()
-    {
-        for (const auto& [key, mp] : values)
-            printf("%u:%s:%f\n", mp.timestamp, mp.identifier.c_str(), mp.value);
-    }
-
-    PacketMapper() {};
 };
 
 #endif
