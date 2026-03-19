@@ -12,8 +12,7 @@ bool between(const char ch, const char min, const char max)
 
 std::string FrameMapping::Str()
 {
-    return Utils::StrFmt("FrameMapping{ range=%d:%d identifier=%s coef=%d unit=%s }", start, end,
-                         identifier, coef, unit);
+    return Utils::StrFmt("FrameMapping{ range=%d:%d identifier=%s coef=%d unit=%s }", start, end, identifier, coef, unit);
 }
 
 bool FrameMapParser::ExpectID(fileiter& it, fileiter end, uint32_t& id)
@@ -102,8 +101,7 @@ bool FrameMapParser::ExpectRange(fileiter& it, fileiter end, uint8_t& first, uin
     return BadEOF();
 }
 
-bool FrameMapParser::ExpectFlag(fileiter& it, fileiter end, bool& is_negable,
-                                bool& is_little_endian, bool& is_float)
+bool FrameMapParser::ExpectFlag(fileiter& it, fileiter end, bool& is_negable, bool& is_little_endian, bool& is_float)
 {
     while (it != end && between(*it, 'a', 'z'))
     {

@@ -2,7 +2,7 @@
 
 #include <chrono>
 
-void RenderTable(const DisplayState& state, const PacketMapper& mapper, uint64_t uptime_ms)
+void RenderTable(const DisplayState& state, const FrameMapper& mapper, uint64_t uptime_ms, uint64_t fps)
 {
     Term::Home();
 
@@ -27,7 +27,7 @@ void RenderTable(const DisplayState& state, const PacketMapper& mapper, uint64_t
     }
     Term::Reset();
     Term::Dim();
-    printf("    rx: %-8lu   uptime: %.1fs", (unsigned long)state.rx_count, uptime_ms / 1000.0);
+    printf("    rx: %-8lu   fps: %-6lu   uptime: %.1fs", (unsigned long)state.rx_count, (unsigned long)fps, uptime_ms / 1000.0);
     Term::Reset();
     printf("\n\n");
 
@@ -52,7 +52,7 @@ void RenderTable(const DisplayState& state, const PacketMapper& mapper, uint64_t
             auto it = state.values.find(mapping.identifier);
             if (it != state.values.end())
             {
-                const MappedPacket& mp  = it->second;
+                const FrameEntry& mp  = it->second;
                 uint32_t            age = now_ms - mp.timestamp;
 
                 printf("  %-24s ", mapping.identifier.c_str());

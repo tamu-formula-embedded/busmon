@@ -7,7 +7,7 @@
 #include <mutex>
 #include <string>
 
-#include "packet_mapper.h"
+#include "frame_mapper.h"
 
 /** ANSI terminal escape helpers */
 namespace Term
@@ -65,9 +65,10 @@ inline void Red()
 struct DisplayState
 {
     std::mutex                          mu;
-    std::map<std::string, MappedPacket> values;
+    std::map<std::string, FrameEntry> values;
     uint64_t                            rx_count{0};
     bool                                connected{false};
+    uint64_t frames_per_sec;
 };
 
 /**
@@ -75,6 +76,6 @@ struct DisplayState
  * CAN values, their units, and age since last update.
  * Age is color-coded: green < 500ms, yellow < 2s, red otherwise.
  */
-void RenderTable(const DisplayState& state, const PacketMapper& mapper, uint64_t uptime_ms);
+void RenderTable(const DisplayState& state, const FrameMapper& mapper, uint64_t uptime_ms, uint64_t fps);
 
 #endif

@@ -10,7 +10,7 @@
 
 #include "can_interface.h"
 #include "display.h"
-#include "packet_mapper.h"
+#include "frame_mapper.h"
 
 #include <atomic>
 #include <chrono>
@@ -24,7 +24,7 @@ static constexpr uint16_t    DEFAULT_PORT = 10001;
 static constexpr int         DEFAULT_HZ   = 10;
 
 static std::atomic<bool> g_running{true};
-static void              SigHandler(int)
+static void SigHandler(int)
 {
     g_running.store(false);
 }
@@ -32,10 +32,10 @@ static void              SigHandler(int)
 struct Args
 {
     std::string config_path;
-    std::string host    = DEFAULT_HOST;
-    uint16_t    port    = DEFAULT_PORT;
-    int         hz      = DEFAULT_HZ;
-    bool        verbose = false;
+    std::string host = DEFAULT_HOST;
+    uint16_t port = DEFAULT_PORT;
+    int hz = DEFAULT_HZ;
+    bool verbose = false;
 };
 
 static void PrintUsage(const char* argv0)
@@ -100,7 +100,7 @@ int main(int argc, char** argv)
     }
 
     /* Load packet mappings from config */
-    PacketMapper mapper;
+    FrameMapper mapper;
     if (!mapper.LoadMappings(args.config_path))
     {
         fprintf(stderr, "Failed to load mappings from %s\n", args.config_path.c_str());
@@ -116,12 +116,12 @@ int main(int argc, char** argv)
     can.SetOnFrame(
             [&](const CANFrame& frame)
             {
-                std::vector<MappedPacket> updated;
-                mapper.MapPacket(frame, updated);
+                mapper.MapFrame(frame);
 
                 std::lock_guard<std::mutex> lock(display.mu);
                 display.rx_count++;
-                for (auto& mp : updated) display.values.insert_or_assign(mp.identifier, mp);
+                display.frames_per_sec++;
+                display.values = mapper.values;
             });
 
     can.SetOnConnect(
@@ -148,15 +148,20 @@ int main(int argc, char** argv)
     Term::HideCursor();
     Term::Clear();
 
+    uint64_t curr_sec = 0;
+    uint64_t display_fps = 0;
+
     while (g_running.load())
     {
-        uint64_t uptime = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  std::chrono::steady_clock::now() - t0)
-                                  .count();
-
+        uint64_t uptime = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
         {
             std::lock_guard<std::mutex> lock(display.mu);
-            RenderTable(display, mapper, uptime);
+            if (uptime - curr_sec > 1000) {
+                display_fps = display.frames_per_sec;
+                display.frames_per_sec = 0;
+                curr_sec = uptime;
+            }
+            RenderTable(display, mapper, uptime, display_fps);
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(1000 / args.hz));

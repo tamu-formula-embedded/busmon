@@ -45,11 +45,11 @@ struct FrameMapping
 /**
  *
  */
+using FrameMappings = std::map<uint32_t, std::vector<FrameMapping>>;
+
 class FrameMapParser
 {
     using fileiter = std::istreambuf_iterator<char>;
-
-    using FrameMappings = std::map<uint32_t, std::vector<FrameMapping>>;
 
     /* treemap is intentional -- bounded to human-comprehensible size n */
     FrameMappings mappings{};

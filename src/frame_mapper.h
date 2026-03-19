@@ -38,10 +38,22 @@ struct FrameEntry
 class FrameMapper
 {
     FrameMappings mappings;
+    FrameMapParser parser;
 
 public:
-    /** Most recent value for each identifier, updated by MapPacket */
+    /** Most recent value for each identifier, updated by MapFrame */
     std::map<std::string, FrameEntry> values{};
+
+    /** Load mappings from a config file */
+    inline bool LoadMappings(const std::string& path)
+    {
+        if (!parser.LoadMappings(path)) return false;
+        mappings = parser.GetMappings();
+        return true;
+    }
+
+    /** Returns the mapping tree */
+    inline const FrameMappings& GetMappings() const { return mappings; }
 
     /**
      * Decode a CAN frame using the loaded mappings.
