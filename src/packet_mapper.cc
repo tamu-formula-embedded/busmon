@@ -13,11 +13,11 @@ bool between(const char ch, const char min, const char max)
 
 std::string PacketMapping::Str()
 {
-    return Utils::StrFmt("PacketMapping{ range=%d:%d identifier=%s coef=%d unit=%s }",
-                         start, end, identifier, coef, unit);
+    return Utils::StrFmt("PacketMapping{ range=%d:%d identifier=%s coef=%d unit=%s }", start, end,
+                         identifier, coef, unit);
 }
 
-bool PacketMapper::ExpectID(fileiter &it, fileiter end, uint32_t &id)
+bool PacketMapper::ExpectID(fileiter& it, fileiter end, uint32_t& id)
 {
     id = 0;
     if (*it == '0')
@@ -45,8 +45,7 @@ bool PacketMapper::ExpectID(fileiter &it, fileiter end, uint32_t &id)
                 }
                 else
                 {
-                    if (*it == '{')
-                        return true;
+                    if (*it == '{') return true;
                     return Unexpected("0-9 or a-f or A-F", *it);
                 }
                 IterWS(it);
@@ -69,8 +68,7 @@ bool PacketMapper::ExpectID(fileiter &it, fileiter end, uint32_t &id)
                 }
                 else
                 {
-                    if (*it == '{')
-                        return true;
+                    if (*it == '{') return true;
                     return Unexpected("0 or 1", *it);
                 }
                 IterWS(it);
@@ -88,19 +86,16 @@ bool PacketMapper::ExpectID(fileiter &it, fileiter end, uint32_t &id)
     }
 }
 
-bool PacketMapper::ExpectRange(fileiter &it, fileiter end, uint8_t &first, uint8_t &last)
+bool PacketMapper::ExpectRange(fileiter& it, fileiter end, uint8_t& first, uint8_t& last)
 {
     while (it != end)
     {
-        if (!between(*it, '1', '8'))
-            return Unexpected("1-8", *it);
+        if (!between(*it, '1', '8')) return Unexpected("1-8", *it);
         first = *it - '1';
         IterWS(it);
-        if (*it != ':')
-            return Unexpected("-", *it);
+        if (*it != ':') return Unexpected("-", *it);
         IterWS(it);
-        if (!between(*it, '1', '8'))
-            return Unexpected("1-8", *it);
+        if (!between(*it, '1', '8')) return Unexpected("1-8", *it);
         last = *it - '1';
         IterWS(it);
         return true;
@@ -108,28 +103,26 @@ bool PacketMapper::ExpectRange(fileiter &it, fileiter end, uint8_t &first, uint8
     return BadEOF();
 }
 
-bool PacketMapper::ExpectIdentifier(fileiter &it, fileiter end, std::string &identifier)
+bool PacketMapper::ExpectIdentifier(fileiter& it, fileiter end, std::string& identifier)
 {
-    if (it == end)
-        return BadEOF();
-    if (!between(*it, 'a', 'z') && !between(*it, 'A', 'Z'))
-        return Unexpected("a-z or A-Z", *it);
+    if (it == end) return BadEOF();
+    if (!between(*it, 'a', 'z') && !between(*it, 'A', 'Z')) return Unexpected("a-z or A-Z", *it);
     identifier += *it++;
     while (it != end)
     {
-        if (between(*it, 'a', 'z') || between(*it, 'A', 'Z') || *it == '_' || between(*it, '0', '9'))
+        if (between(*it, 'a', 'z') || between(*it, 'A', 'Z') || *it == '_' ||
+            between(*it, '0', '9'))
             identifier += *it++;
         else
         {
-            if (is_whitespace(*it))
-                IterWS(it);
+            if (is_whitespace(*it)) IterWS(it);
             return true;
         }
     }
     return BadEOF();
 }
 
-bool PacketMapper::ExpectCoef(fileiter &it, fileiter end, uint64_t &coef)
+bool PacketMapper::ExpectCoef(fileiter& it, fileiter end, uint64_t& coef)
 {
     coef = 0;
     while (it != end)
@@ -142,15 +135,14 @@ bool PacketMapper::ExpectCoef(fileiter &it, fileiter end, uint64_t &coef)
         }
         else
         {
-            if (is_whitespace(*it))
-                IterWS(it);
+            if (is_whitespace(*it)) IterWS(it);
             break;
         }
     }
     return coef != 0; /* coef must be non-zero; 0 also indicates parse failure */
 }
 
-bool PacketMapper::LoadMappings(const std::string &path)
+bool PacketMapper::LoadMappings(const std::string& path)
 {
     std::ifstream file(path);
     if (!file)
@@ -159,36 +151,29 @@ bool PacketMapper::LoadMappings(const std::string &path)
         return false;
     }
 
-    fileiter it = std::istreambuf_iterator<char>(file);
+    fileiter it  = std::istreambuf_iterator<char>(file);
     fileiter end = std::istreambuf_iterator<char>();
 
     while (it != end)
     {
 
         uint32_t can_id;
-        if (!ExpectID(it, end, can_id))
-            return false;
+        if (!ExpectID(it, end, can_id)) return false;
 
-        if (*it != '{')
-            return Unexpected("{", *it);
-        else
-            IterWS(it);
+        if (*it != '{') return Unexpected("{", *it);
+        else IterWS(it);
 
         std::vector<PacketMapping> mappings;
         while (it != end)
         {
             std::string identifier;
-            if (!ExpectIdentifier(it, end, identifier))
-                return false;
+            if (!ExpectIdentifier(it, end, identifier)) return false;
 
-            if (*it != '=')
-                return Unexpected("=", *it);
-            else
-                IterWS(it);
+            if (*it != '=') return Unexpected("=", *it);
+            else IterWS(it);
 
             uint8_t first, last;
-            if (!ExpectRange(it, end, first, last))
-                return false;
+            if (!ExpectRange(it, end, first, last)) return false;
 
             uint64_t coef = 1;
             if (*it == '/')
@@ -239,25 +224,23 @@ bool PacketMapper::LoadMappings(const std::string &path)
     return true;
 }
 
-void PacketMapper::MapPacket(const CANFrame &packet, std::vector<MappedPacket> &vec)
+void PacketMapper::MapPacket(const CANFrame& packet, std::vector<MappedPacket>& vec)
 {
     auto it = mappings.find(packet.id);
-    if (it == mappings.end())
-        return;
+    if (it == mappings.end()) return;
 
-    for (const PacketMapping &mapping : it->second)
+    for (const PacketMapping& mapping : it->second)
     {
         int64_t extracted = 0;
-        int width = mapping.end - mapping.start;
+        int     width     = mapping.end - mapping.start;
         for (int i = mapping.start, j = 0; i <= (int)mapping.end; i++)
         {
             extracted |= (int64_t)packet.data[i] << (8 * (width - (j++)));
         }
-        if (mapping.negable && ((int8_t)packet.data[mapping.start] < 0))
-            extracted = -extracted;
+        if (mapping.negable && ((int8_t)packet.data[mapping.start] < 0)) extracted = -extracted;
 
         double adjusted = extracted / (double)mapping.coef;
-        auto mp = MappedPacket(mapping.identifier, adjusted, packet.timestamp);
+        auto   mp       = MappedPacket(mapping.identifier, adjusted, packet.timestamp);
         values.insert_or_assign(mapping.identifier, mp);
         vec.push_back(mp);
     }
@@ -266,20 +249,18 @@ void PacketMapper::MapPacket(const CANFrame &packet, std::vector<MappedPacket> &
 std::string PacketMapper::Str()
 {
     std::string d = "[\n";
-    for (const auto &[can_id, submappings] : mappings)
+    for (const auto& [can_id, submappings] : mappings)
     {
         d += Utils::StrFmt("  Mapping{ can_id=%04x submappings={\n", can_id);
-        for (auto submapping : submappings)
-            d += "    " + submapping.Str() + "\n";
+        for (auto submapping : submappings) d += "    " + submapping.Str() + "\n";
         d += "  } }\n";
     }
     d += "]\n";
     return d;
 }
 
-void PacketMapper::LogState(std::ofstream &file, uint64_t global_start_time)
+void PacketMapper::LogState(std::ofstream& file, uint64_t global_start_time)
 {
     file << "@" << Utils::PreciseTime<uint32_t, Utils::t_ms>() - global_start_time << "\n";
-    for (const auto &[key, mp] : values)
-        file << key << "=" << mp.value << "\n";
+    for (const auto& [key, mp] : values) file << key << "=" << mp.value << "\n";
 }

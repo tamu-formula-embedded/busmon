@@ -72,3 +72,4 @@
 0x0A1 {
     dtiAppsScaled = 1:2
 }
+

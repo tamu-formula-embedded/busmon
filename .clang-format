@@ -8,7 +8,7 @@ DerivePointerAlignment: false
 PointerAlignment: Left    
 ColumnLimit: 100
 ContinuationIndentWidth: 8    
-AllowShortBlocksOnASingleLine: true    
+AllowShortBlocksOnASingleLine: false
 AllowShortCaseLabelsOnASingleLine: true    
 AllowShortEnumsOnASingleLine: true    
 AllowShortFunctionsOnASingleLine: false    
