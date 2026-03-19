@@ -64,3 +64,11 @@
 0x528 {
     ivtEnergy = 3:4
 }
+
+0x181 {
+    dtiDriveEnable = 1:2
+}
+
+0x0A1 {
+    dtiAppsScaled = 1:2
+}
