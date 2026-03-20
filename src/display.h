@@ -68,7 +68,7 @@ struct DisplayState
     std::map<std::string, FrameEntry> values;
     uint64_t                            rx_count{0};
     bool                                connected{false};
-    uint64_t frames_per_sec;
+    uint64_t frames_per_sec{0};
 };
 
 /**

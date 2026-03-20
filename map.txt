@@ -1,66 +1,71 @@
+/* C-style comments */
+// C-style comments
+
+0x0D5 {
+    someVal = uint(1:2);
+    anotherVal (V) = uint(3:4) / 1000;
+    someFloat = float(5:8);
+}
+
+0b1110000 {
+    foo (mV6767) = int(1:4 L) / 1000;
+}
+
 0x0D3 {
-    apps1Raw = 1:2,
-    apps2Raw = 3:4,
-    bppRaw = 5:6
+    apps1Raw = uint(1:2);
+    apps2Raw = uint(3:4);
+    bppRaw = uint(5:6);
 }
 
 0x0D4 {
-    rxFrames = 1:4,
-    rxFramesUnmatched = 5:8
-}
-
-0x0D5 {
-    apps1Val = 1:2,
-    apps2Val = 3:4,
-    bseMv = 5:6 (mV),
-    appsAvg = 7:8
+    rxFrames = uint(1:4);
+    rxFramesUnmatched = uint(5:8);
 }
 
 0x0D6 {
-    btnPressed = 1:2,
-    sdcClosed = 3:4,
-    bppDepressed = 5:6,
-    drvEn = 7:8
+    btnPressed = uint(1:2);
+    sdcClosed = uint(3:4);
+    bppDepressed = uint(5:6);
+    drvEn = uint(7:8);
 }
 
 0x0D7 {
-    appsPl = 1:2,
-    bppPl = 3:4
+    appsPl = uint(1:2);
+    bppPl = uint(3:4);
 }
 
-
 0x401 {
-    erpm = 1:4
+    erpm = uint(1:4);
 }
 
 0x01C {
-    bmsIters = 1:4
+    bmsIters = uint(1:4);
 }
 
 0x521 {
-    ivtCurrent = 3:6
+    ivtCurrent = uint(3:6);
 }
 
 0x522 {
-    ivtVoltage1 = 3:4
+    ivtVoltage1 = uint(3:4);
 }
 
 0x523 {
-    ivtVoltage2 = 3:4
+    ivtVoltage2 = uint(3:4);
 }
 
 0x524 {
-    ivtVoltage3 = 3:4
+    ivtVoltage3 = uint(3:4);
 }
 
 0x526 {
-    ivtPower = 3:4
+    ivtPower = uint(3:4);
 }
 
 0x527 {
-    ivtCharge = 3:4
+    ivtCharge = uint(3:4);
 }
 
 0x528 {
-    ivtEnergy = 3:4
+    ivtEnergy = uint(3:4);
 }

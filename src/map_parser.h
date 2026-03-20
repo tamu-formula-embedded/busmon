@@ -7,10 +7,14 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <cstring>
+#include <algorithm>
 
 #include "utils.h"
 
 struct CANFrame;
+
+static std::vector<std::string> expected_types({"uint", "int", "float", "double"});
 
 bool is_whitespace(const char ch);
 
@@ -49,13 +53,11 @@ using FrameMappings = std::map<uint32_t, std::vector<FrameMapping>>;
 
 class FrameMapParser
 {
-    using fileiter = std::istreambuf_iterator<char>;
-
     /* treemap is intentional -- bounded to human-comprehensible size n */
     FrameMappings mappings{};
 
-    /** Advance iterator past the current char and any trailing whitespace */
-    inline char IterWS(fileiter& it)
+    /** Advance past current char and any trailing whitespace */
+    inline char IterWS(const char*& it)
     {
         char n = *it++;
         while (is_whitespace(*it)) it++;
@@ -65,42 +67,45 @@ class FrameMapParser
     /** Report an unexpected character during parsing */
     inline bool Unexpected(const std::string& expected, char unexpected)
     {
-        printf("[ParsingError] Expected %s, found %c\n", expected.c_str(), unexpected);
+        printf("Parsing error: Expected %s, found %c\n", expected.c_str(), unexpected);
         return false;
     }
 
     /** Report an unexpected EOF during parsing */
     inline bool BadEOF()
     {
-        printf("[ParsingError] Reached EOF before expected\n");
+        printf("Parsing error: Reached EOF before expected\n");
         return false;
     }
+
+    /** Skip whitespace and comments (line and block) */
+    void SkipWSAndComments(const char*& it, const char* end);
 
     /**
      * Parses the CAN ID at the beginning of a rule.
      * Accepts hex (0x...) or binary (0b...) with optional
      * whitespace breaks for readability.
      */
-    bool ExpectID(fileiter& it, fileiter end, uint32_t& id);
+    bool ExpectID(const char*& it, const char* end, uint32_t& id);
 
     /**
      * Parses a byte range N:M where N,M are digits in [1,8].
      * Result is stored 0-indexed in first and last.
      */
-    bool ExpectRange(fileiter& it, fileiter end, uint8_t& first, uint8_t& last);
-
-    bool ExpectFlag(fileiter& it, fileiter end, bool& is_negable, bool& is_little_endian,
-                    bool& is_float);
+    bool ExpectRange(const char*& it, const char* end, uint8_t& first, uint8_t& last);
 
     /**
      * Parses an identifier token.
      * First char must be a-z or A-Z, subsequent chars may
      * also include 0-9 and underscore.
      */
-    bool ExpectIdentifier(fileiter& it, fileiter end, std::string& identifier);
+    bool ExpectIdentifier(const char*& it, const char* end, std::string& identifier);
+
+    /** Parses type keyword: uint, int, float, double */
+    bool ExpectType(const char*& it, const char* end, std::string& type);
 
     /** Parses a decimal integer coefficient (must be non-zero) */
-    bool ExpectCoef(fileiter& it, fileiter end, uint64_t& coef);
+    bool ExpectCoef(const char*& it, const char* end, uint64_t& coef);
 
 public:
     /** Parse the mapping config from a file */

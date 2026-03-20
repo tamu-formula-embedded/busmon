@@ -15,7 +15,7 @@ std::string FrameMapping::Str()
     return Utils::StrFmt("FrameMapping{ range=%d:%d identifier=%s coef=%d unit=%s }", start, end, identifier, coef, unit);
 }
 
-bool FrameMapParser::ExpectID(fileiter& it, fileiter end, uint32_t& id)
+bool FrameMapParser::ExpectID(const char*& it, const char* end, uint32_t& id)
 {
     id = 0;
     if (*it == '0')
@@ -84,7 +84,7 @@ bool FrameMapParser::ExpectID(fileiter& it, fileiter end, uint32_t& id)
     }
 }
 
-bool FrameMapParser::ExpectRange(fileiter& it, fileiter end, uint8_t& first, uint8_t& last)
+bool FrameMapParser::ExpectRange(const char*& it, const char* end, uint8_t& first, uint8_t& last)
 {
     while (it != end)
     {
@@ -101,28 +101,33 @@ bool FrameMapParser::ExpectRange(fileiter& it, fileiter end, uint8_t& first, uin
     return BadEOF();
 }
 
-bool FrameMapParser::ExpectFlag(fileiter& it, fileiter end, bool& is_negable, bool& is_little_endian, bool& is_float)
+void FrameMapParser::SkipWSAndComments(const char*& it, const char* end)
 {
-    while (it != end && between(*it, 'a', 'z'))
+    while (it < end)
     {
-        std::string kw;
-        while (it != end && between(*it, 'a', 'z')) kw += *it++;
-
-        if (is_whitespace(*it)) IterWS(it);
-
-        if (kw == "signed") is_negable = true;
-        else if (kw == "little") is_little_endian = true;
-        else if (kw == "float") is_float = true;
+        if (is_whitespace(*it))
+        {
+            it++;
+        }
+        else if (it + 1 < end && *it == '/' && *(it + 1) == '/')
+        {
+            it += 2;
+            while (it < end && *it != '\n') it++;
+        }
+        else if (it + 1 < end && *it == '/' && *(it + 1) == '*')
+        {
+            it += 2;
+            while (it + 1 < end && !(*it == '*' && *(it + 1) == '/')) it++;
+            if (it + 1 < end) it += 2;
+        }
         else
         {
-            printf("uknnown keyword bro bro: %s\n", kw.c_str());
-            return false;
+            break;
         }
     }
-    return true;
 }
 
-bool FrameMapParser::ExpectIdentifier(fileiter& it, fileiter end, std::string& identifier)
+bool FrameMapParser::ExpectIdentifier(const char*& it, const char* end, std::string& identifier)
 {
     if (it == end) return BadEOF();
     if (!between(*it, 'a', 'z') && !between(*it, 'A', 'Z')) return Unexpected("a-z or A-Z", *it);
@@ -141,7 +146,31 @@ bool FrameMapParser::ExpectIdentifier(fileiter& it, fileiter end, std::string& i
     return BadEOF();
 }
 
-bool FrameMapParser::ExpectCoef(fileiter& it, fileiter end, uint64_t& coef)
+bool FrameMapParser::ExpectType(const char*& it, const char* end, std::string& type)
+{
+    // same as expectidentifier. except, must be one of the expected types
+    if (it == end) return BadEOF();
+    if (!between(*it, 'a', 'z') && !between(*it, 'A', 'Z')) return Unexpected("a-z or A-Z", *it);
+    type += *it++;
+    while (it != end)
+    {
+        if (between(*it, 'a', 'z') || between(*it, 'A', 'Z') || *it == '_' ||
+            between(*it, '0', '9'))
+            type += *it++;
+        else
+        {
+            if (is_whitespace(*it)) IterWS(it);
+
+            if (std::find(expected_types.begin(), expected_types.end(), type) != expected_types.end()) return true;
+
+            // todo: log error
+            return false;
+        }
+    }
+    return BadEOF();
+}
+
+bool FrameMapParser::ExpectCoef(const char*& it, const char* end, uint64_t& coef)
 {
     coef = 0;
     while (it != end)
@@ -170,33 +199,72 @@ bool FrameMapParser::LoadMappings(const std::string& path)
         return false;
     }
 
-    fileiter it  = std::istreambuf_iterator<char>(file);
-    fileiter end = std::istreambuf_iterator<char>();
+    std::string src((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 
-    while (it != end)
+    const char* it = src.data();
+    const char* end = it + src.size();
+
+    SkipWSAndComments(it, end);
+
+    while (it < end)
     {
-
         uint32_t can_id;
         if (!ExpectID(it, end, can_id)) return false;
 
         if (*it != '{') return Unexpected("{", *it);
-        else IterWS(it);
+        IterWS(it);
 
         std::vector<FrameMapping> mappings;
-        while (it != end)
+        while (it < end)
         {
+            if (*it == '}')
+            {
+                IterWS(it);
+                break;
+            }
+
+            // identifier
             std::string identifier;
             if (!ExpectIdentifier(it, end, identifier)) return false;
 
+            // optional (unit) before =
+            std::string unit;
+            if (*it == '(')
+            {
+                IterWS(it);
+                while (it < end && *it != ')')
+                    unit += *it++;
+                if (it == end) return BadEOF();
+                IterWS(it);
+            }
+
+            // =
             if (*it != '=') return Unexpected("=", *it);
-            else IterWS(it);
+            IterWS(it);
+
+            // type: uint, int, float, double
+            std::string type;
+            if (!ExpectType(it, end, type)) return false;
+
+            // (range [L])
+            if (*it != '(') return Unexpected("(", *it);
+            IterWS(it);
 
             uint8_t first, last;
             if (!ExpectRange(it, end, first, last)) return false;
 
-            bool is_negable = false, is_little_endian = false, is_float = false;
-            if (!ExpectFlag(it, end, is_negable, is_little_endian, is_float)) return false;
+            // optional L for little-endian before )
+            bool is_little_endian = false;
+            if (*it == 'L')
+            {
+                is_little_endian = true;
+                IterWS(it);
+            }
 
+            if (*it != ')') return Unexpected(")", *it);
+            IterWS(it);
+
+            // optional / coef
             uint64_t coef = 1;
             if (*it == '/')
             {
@@ -208,20 +276,9 @@ bool FrameMapParser::LoadMappings(const std::string& path)
                 }
             }
 
-            std::string unit = "";
-            if (*it == '(')
-            {
-                IterWS(it);
-                while (it != end)
-                {
-                    if (*it == ')')
-                    {
-                        IterWS(it);
-                        break;
-                    }
-                    unit += *it++;
-                }
-            }
+            // derive flags from type
+            bool is_negable = (type == "int");
+            bool is_float = (type == "float" || type == "double");
 
             FrameMapping mapping{first, last, identifier, coef, unit};
             mapping.negable          = is_negable;
@@ -229,22 +286,13 @@ bool FrameMapParser::LoadMappings(const std::string& path)
             mapping.is_float         = is_float;
             mappings.push_back(mapping);
 
-            if (*it == '}')
-            {
-                IterWS(it);
-                break;
-            }
-            else if (*it == ',')
-            {
-                IterWS(it);
-                continue;
-            }
-            else
-            {
-                return Unexpected(", or }", *it);
-            }
+            // ; delimiter
+            if (*it != ';') return Unexpected(";", *it);
+            IterWS(it);
         }
+
         this->mappings[can_id] = mappings;
+        SkipWSAndComments(it, end);
     }
     return true;
 }

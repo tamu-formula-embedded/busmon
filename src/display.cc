@@ -27,7 +27,7 @@ void RenderTable(const DisplayState& state, const FrameMapper& mapper, uint64_t 
     }
     Term::Reset();
     Term::Dim();
-    printf("    rx: %-8lu   fps: %-6lu   uptime: %.1fs", (unsigned long)state.rx_count, (unsigned long)fps, uptime_ms / 1000.0);
+    printf("    rx: %-8lu   fps: %-6lu   uptime: %.1fs%-10s", (unsigned long)state.rx_count, (unsigned long)fps, uptime_ms / 1000.0, "");
     Term::Reset();
     printf("\n\n");
 
