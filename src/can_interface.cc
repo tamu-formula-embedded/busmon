@@ -156,7 +156,7 @@ bool CanInterface::SendFrame(uint32_t can_id, const uint8_t* data, uint8_t len)
     std::memcpy(pkt + 5, data, std::min<int>(len, 8));
 
     std::lock_guard<std::mutex> lock(write_mu_);
-    ssize_t                     n = ::send(sockfd_, pkt, 13, MSG_NOSIGNAL);
+    ssize_t n = ::send(sockfd_, pkt, 13, MSG_NOSIGNAL);
     if (n != 13)
     {
         if (verbose_) fprintf(stderr, "[can] send failed: %s\n", strerror(errno));
@@ -184,9 +184,19 @@ void CanInterface::RxLoop()
 
     while (running_.load() && connected_.load())
     {
+        // handle reconnect
+        if(!IsConnected())
+        {
+            if(!Connect()) {
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
+        }
+
         if (!ReadFully(buf, 13))
         {
-            if (running_.load() && verbose_) fprintf(stderr, "[can] rx: connection lost\n");
+            if (running_.load() && verbose_) {
+                fprintf(stderr, "[can] rx: connection lost\n");
+            }
             break;
         }
 
@@ -198,9 +208,8 @@ void CanInterface::RxLoop()
         std::memcpy(data, buf + 5, 8);
 
         CANFrame frame(can_id, data);
-        auto     now    = std::chrono::steady_clock::now().time_since_epoch();
-        frame.timestamp = static_cast<uint32_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
+        auto now    = std::chrono::steady_clock::now().time_since_epoch();
+        frame.timestamp = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
 
         if (verbose_) printf("[can] rx %s\n", frame.Str().c_str());
 
