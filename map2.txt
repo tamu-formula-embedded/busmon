@@ -1,0 +1,49 @@
+0x310 {
+    PitLink_Iters = 1:4,
+    PitLink_Status = 5:8
+}
+0x311 {
+    PitLink_RxCnt = 1:4,
+    PitLink_TxCnt = 5:8
+}
+
+0x0dc {
+    dcbl = 1:1
+}
+
+0x301 {
+    rl_num_rxd = 1:4,
+    rl_num_txd = 5:8
+}
+
+0x302 {
+    rl_num_drop = 1:4,
+    rl_rate_rxd = 5:8
+}
+
+0x303 {
+    rl_rate_txd = 1:4,
+    rl_rate_drop = 5:8
+}
+
+0x304 {
+    rl_q_size = 1:4
+}
+
+0x0DA {
+    V_rms = 1:2, 
+    I_rms = 3:4,
+    P_req = 5:6,
+    P_max = 7:8
+}
+
+0x1806E5F4 {
+    elcon_v_req = 1:2,
+    elcon_i_req = 3:4,
+    elcon_en = 5:5
+}
+
+0x18FF50E5 {
+    elcon_v_out = 1:2,
+    elcon_i_out = 3:4
+}
